@@ -1,0 +1,4 @@
+rfdetr[train,loggers]
+optuna
+ultralytics
+sahi
