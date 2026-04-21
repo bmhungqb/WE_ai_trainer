@@ -11,12 +11,12 @@ from typing import Dict, Any, List
 from utils.logger import get_logger
 from src.data_processor import DataProcessor
 from src.ai_verify import AIVerify
-from utils.evaluator import Evaluator
 from utils.ai_trainer import EnhancedAITrainer
-from utils.dataset_manager import DatasetManager
+from src.dataset_manager import DatasetManager
 from utils.models import ImageRecord, VerifyResult, TrainedModel
 from utils.gcs_utils import push_file_to_gcs
-
+from utils.label_studio_utils import pull_from_label_studio 
+from src.ai_trainer import AITrainer
 logger = get_logger(__name__)
 
 
@@ -30,7 +30,8 @@ class AgenticAIPipeline:
         self._load_config(config_path)
         self.data_processor = DataProcessor()
         self.ai_verify = AIVerify(self.config)
-        # self.ai_trainer = EnhancedAITrainer(use_optuna=True, use_distillation=True)
+        self.ai_trainer = AITrainer(self.config['training_pipeline']['ai_trainer_configs'])
+        self.data_manager = DatasetManager(self.config['data_management'])
         logger.info("Pipeline components initialized successfully")
     
     def _load_config(self, config_path: str):
@@ -68,14 +69,12 @@ class AgenticAIPipeline:
         logger.info("=" * 80)
         try:
             # Pull reviewed data from label studio
-            human_verified_data = self.data_processor.pull_from_label_studio()
+            path_new_annotation_file = pull_from_label_studio()
+            path_old_annotation_file = pull_from_label_studio(is_pull_old_dataset=True)
             # Mix new data and old dataset.
-            
-            # Train multiple model versions
-            
-            # Evaluate models
-
-            # Return best model based on defined criteria.
+            self.data_manager.merge_old_new_data(path_old_annotation_file, path_new_annotation_file)
+            # Optuna hyperparameter optimization.
+            self.ai_trainer.train_with_optuna()
         except Exception as e:
             logger.error(f"Phase Training failed: {str(e)}", exc_info=True)
             raise

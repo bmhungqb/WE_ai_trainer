@@ -3,3 +3,4 @@ optuna
 sahi
 google-cloud-storage
 rfdetr_plus
+label-studio-sdk

@@ -1,4 +1,13 @@
 {
+  "date": {
+    "start": "2026-04-19",
+    "end": "2026-04-20"
+  },
+  "label_studio_configs": {
+    "url": "https://labelstudio.laka.ai",
+    "api_key": "31d6593ddbaf44e3c013bd0bfe11619326b352a0",
+    "project_id": 22
+  },
   "data_pipeline": {
     "gcs_buckets": [
       {
@@ -38,35 +47,15 @@
       "stratified_sampling": true
     },
     "ai_trainer_configs":{
-      "optuna": {
-        "enabled": true,
-        "n_trials": 10,
-        "sampler": "TPESampler"
-      },
-      "knowledge_distillation": {
-        "enabled": true,
-        "teacher_model": "old_model",
-        "distillation_temperature": 3.0,
-        "alpha": 0.5
-      },
-      "training": {
-        "batch_size": 32,
-        "epochs": 50,
-        "learning_rate": 0.001,
-        "weight_decay": 1e-5,
-        "dropout": 0.5,
-        "optimizer": "Adam"
-      },
-      "model_versions": 3
+      "dataset_path": "",
+      "pretrained_weights": "weights/weight_rfdetr_m_slice_dinov3_v3.pth",
+      "n_trials": 10
     },
     "evaluation_configs":{
       "metrics": [
-        "accuracy",
-        "precision",
+        "map50",
         "recall",
-        "f1_score",
-        "confusion_matrix",
-        "roc_auc"
+        "f1_score"
       ]
     }
   },
@@ -77,5 +66,9 @@
     "console_format": "simple",
     "max_bytes": 10485760,
     "backup_count": 5
+  },
+  "data_management": {
+    "old_split_path": "",
+    "new_split_ratio": [0.7, 0.2, 0.1]
   }
 }
