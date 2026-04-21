@@ -29,11 +29,8 @@ class AgenticAIPipeline:
         logger.info("=" * 80)
         self._load_config(config_path)
         self.data_processor = DataProcessor()
-        self.ai_verify = AIVerify()
-        self.evaluator = Evaluator()
-        self.dataset_manager = DatasetManager()
-        self.ai_trainer = EnhancedAITrainer(use_optuna=True, use_distillation=True)
-        self.pipeline_state = {}
+        self.ai_verify = AIVerify(self.config)
+        # self.ai_trainer = EnhancedAITrainer(use_optuna=True, use_distillation=True)
         logger.info("Pipeline components initialized successfully")
     
     def _load_config(self, config_path: str):
@@ -47,20 +44,19 @@ class AgenticAIPipeline:
             logger.error(f"Error loading configuration: {str(e)}", exc_info=True)
             raise
         
-    def run_prepare_data_pipeline(self, config: dict) -> bool:
+    def run_prepare_data_pipeline(self) -> bool:
         '''Prepare new data for human review.'''
         logger.info("\n" + "=" * 80)
         logger.info("PREPARING NEW DATA")
         logger.info("=" * 80)
         try:
             # pull new data from gcs
-            sample_records = self.data_processor.download_data_from_gcs(config["data_pipeline"]['gcs_buckets'])
+            sample_records = self.data_processor.download_data_from_gcs(self.config["data_pipeline"]['gcs_buckets'])
             # Using larger AI models to verify and voting mechanism.
             verified_records = self.ai_verify.predict_with_models(sample_records)
             # Push new data to label studio for human review.
             json_tmp_file_path = self.data_processor.get_label_studio_format_json(verified_records)
-
-            push_file_to_gcs(json_tmp_file_path, config["data_pipeline"]['gcs_destination'])
+            push_file_to_gcs(json_tmp_file_path, self.config["data_pipeline"]['output_configs']['gcs_destination'])
         except Exception as e:
             logger.error(f"Phase Prepare Data failed: {str(e)}", exc_info=True)
             raise   
@@ -89,51 +85,3 @@ class AgenticAIPipeline:
         logger.info("\n" + "=" * 80)
         logger.info("STARTING COMPLETE AGENTIC AI PIPELINE")
         logger.info("=" * 80)
-        
-        try:
-            # Phase 1: Data Processing
-            processed_data = self.phase_1_data_processing()
-            
-            # Phase 2: AI Verify
-            verify_result = self.phase_2_ai_verify(processed_data)
-            
-            # Phase 3: Human Review
-            verified_data = self.phase_3_human_review(verify_result)
-            
-            # Phase 4: Dataset Management
-            dataset_result = self.phase_4_dataset_management(verified_data)
-            
-            # Phase 5: AI Training
-            training_result = self.phase_5_ai_training(
-                dataset_result["train_set"],
-                dataset_result["val_set"]
-            )
-            
-            # Phase 6: Evaluation
-            evaluation_result = self.phase_6_evaluation(training_result["best_model"])
-            
-            # Summary
-            logger.info("\n" + "=" * 80)
-            logger.info("PIPELINE EXECUTION SUMMARY")
-            logger.info("=" * 80)
-            logger.info(f"✓ Phase 1: Data Processing - COMPLETED")
-            logger.info(f"✓ Phase 2: AI Verify - COMPLETED")
-            logger.info(f"✓ Phase 3: Human Review - COMPLETED")
-            logger.info(f"✓ Phase 4: Dataset Management - COMPLETED")
-            logger.info(f"✓ Phase 5: AI Training - COMPLETED")
-            logger.info(f"✓ Phase 6: Evaluation - {'PASSED' if evaluation_result['criteria_met'] else 'NEEDS REVIEW'}")
-            logger.info(f"\nBest Model: {evaluation_result['model_id']}")
-            logger.info(f"Accuracy: {evaluation_result['metrics'].accuracy:.4f}")
-            logger.info("=" * 80)
-            
-            return {
-                "status": "success",
-                "evaluation": evaluation_result
-            }
-            
-        except Exception as e:
-            logger.error(f"Pipeline execution failed: {str(e)}", exc_info=True)
-            return {
-                "status": "failed",
-                "error": str(e)
-            }

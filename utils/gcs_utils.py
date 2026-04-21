@@ -6,7 +6,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
     
-def init_connect_gcs_bucket(self, bucket_name: str = "we-textile-defects"):
+def init_connect_gcs_bucket(self, bucket_name: str = "jetson-textile-storage"):
     """Connect to Google Cloud Storage."""
     logger.info(f"Connecting to Google Cloud Storage bucket: {bucket_name}")
     try:
@@ -18,11 +18,11 @@ def init_connect_gcs_bucket(self, bucket_name: str = "we-textile-defects"):
         raise   
 
 def push_file_to_gcs(local_file_path: Path, gcs_destination: str) -> bool:
-    bucket = init_connect_gcs_bucket(bucker_name)
+    bucket = init_connect_gcs_bucket(gcs_destination.split("/")[0])
     try:
-        blob = bucket.blob(local_file_path.name)
+        blob = bucket.blob(gcs_destination)
         blob.upload_from_filename(str(local_file_path))
-        logger.info(f"Pushed {local_file_path} to {bucker_name}/{local_file_path.name}")
+        logger.info(f"Pushed {local_file_path} to {gcs_destination}")
         return True
     except Exception as e:
         logger.error(f"Error pushing file to Google Cloud Storage: {str(e)}", exc_info=True)

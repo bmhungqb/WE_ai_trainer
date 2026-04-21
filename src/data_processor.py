@@ -111,25 +111,29 @@ class DataProcessor:
                     "image": record.img_path
                 }   
             }
+            origin_width, origin_height = record.width, record.height
             sample["predictions"] = []
-            for pred in record.predictions:
-                sample["predictions"].append({
-                    "result": [
-                        {
-                            "from_name": "result",
-                            "to_name": "image",
-                            "type": "rectanglelabels",
-                            "value": {
-                                "x": pred.box["x"],
-                                "y": pred.box["y"],
-                                "width": pred.box["width"],
-                                "height": pred.box["height"],
-                                "rotation": 0,
-                                "rectangleLabels": [pred.label]
-                            }
-                        }
-                    ]
+            preds = []
+            for pred in record.final_pre_annotations:
+                preds.append({
+                    "from_name": "label",
+                    "to_name": "image",
+                    "type": "rectanglelabels",
+                    "original_width": origin_width,
+                    "original_height": origin_height,
+                    "value": {
+                        "x": (pred.bbox[0]/origin_width)*100,
+                        "y": (pred.bbox[1]/origin_height)*100,
+                        "width": (pred.bbox[2]/origin_width)*100,
+                        "height": (pred.bbox[3]/origin_height)*100,
+                        "rotation": 0,
+                        "rectanglelabels": [pred.defect_type]
+                    }
                 })
+            sample["predictions"].append({
+                'model_version': 'finnal_preannotation',
+                'result': preds
+            })
             records.append(sample)
         
         file_name = f"tasks_label_studio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"

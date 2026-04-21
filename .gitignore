@@ -1,0 +1,6 @@
+.venv
+tmp
+logs
+*__pycache__
+*.pth
+.env

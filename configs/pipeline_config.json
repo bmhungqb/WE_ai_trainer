@@ -15,17 +15,10 @@
       }
     ],  
     "verify_configs": {
-      "quality_threshold": 0.8,
-      "confidence_threshold": 0.75,
-      "voting_method": "majority_voting",
       "models": [
         {
           "model_type": "rfdetrMedium",
-          "weight_path": "model_weight/rfdetrmedium_0.pth"  
-        },
-        {
-          "model_type": "rfdetrXLarge",
-          "weight_path": "model_weight/rfdetrxlarge_0.pth"  
+          "weight_path": "weights/weight_rfdetr_m_slice_dinov3_v3.pth"  
         }
       ]
     },

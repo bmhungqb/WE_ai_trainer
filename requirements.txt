@@ -1,4 +1,5 @@
 rfdetr[train,loggers]
 optuna
-ultralytics
 sahi
+google-cloud-storage
+rfdetr_plus

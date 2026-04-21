@@ -7,6 +7,8 @@ import logging
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import torch
+import json
+from io import BytesIO
 from PIL import Image
 from utils.logger import get_logger
 from utils.models import SampleInfo, Annotation, VerifyResult, ModelPrediction
@@ -17,7 +19,7 @@ from sahi.predict import get_sliced_prediction
 from rfdetr import RFDETRMedium
 from rfdetr_plus import RFDETRXLarge
 
-from utils.constants import DEFECT_CLASSES
+from utils.constants import DEFECT_CLASSES, MAPPING_CLASSES
 
 logger = get_logger(__name__)
 
@@ -36,16 +38,15 @@ class AIVerify:
             model_type = model_dict['model_type']
             weight_path = model_dict['weight_path']
             if model_type == 'rfdetrMedium':
-                model = RFDETRMedium(weight_path=weight_path)
+                model = RFDETRMedium(pretrain_weights=weight_path)
             elif model_type == 'rfdetrXLarge':
-                model = RFDETRXLarge(weight_path=weight_path)
+                model = RFDETRXLarge(pretrain_weights=weight_path)
             model.optimize_for_inference()
             detection_model_sahi = AutoDetectionModel.from_pretrained(
                 model_type="roboflow",
                 model=model,
                 category_mapping=DEFECT_CLASSES,
                 confidence_threshold=threshold,
-                device=self.device,
             )
             models.append(detection_model_sahi)
         logger.info(f"Initialized {len(models)} detection models.")
@@ -54,21 +55,21 @@ class AIVerify:
     def _convert_sahi_to_annotations(self, prediction) -> List[Annotation]:
         pred_coco_format = prediction.to_coco_annotations()
         annotations = []
-        for annotation in pred_coco_format['annotations']:
+        for annotation in pred_coco_format:
+            x1, y1, x2, y2 = annotation['bbox'] 
             annotations.append(Annotation(
-                bbox=annotation['bbox'],
+                bbox=[x1, y1, x2, y2],
                 confidence=annotation['score'],
-                defect_type=annotation['category_id']
+                defect_type=DEFECT_CLASSES.get(annotation['category_id'])
             ))
         return annotations
     
-    def inference_with_sahi(self, model: Any, image: Image, iou_threshold: float, confidence_threshold: float) -> ModelPrediction:
+    def inference_with_sahi(self, model: Any, image: Image) -> ModelPrediction:
         result = get_sliced_prediction(
             image,
             model,
             slice_height=512,
             slice_width=512,
-            overlap=0.2,
             verbose=False,
         )
         model_version = model.__class__.__name__
@@ -93,23 +94,49 @@ class AIVerify:
                 bucket_client = list_bucket_client[bucker_name]
                 
                 if anno_path:
+                    # Strip the gs:// URI prefix to get the relative object path
+                    if anno_path.startswith(f"gs://{bucker_name}/"):
+                        anno_path = anno_path.split(f"gs://{bucker_name}/")[1]
+                    elif anno_path.startswith("gs://"):
+                        anno_path = "/".join(anno_path.split("/")[3:])
                     annotation = bucket_client.blob(anno_path).download_as_text()
                     human_annotated = json.loads(annotation)
+
                     # logic to pre-process human annotations
+                    preds = human_annotated.get('pos', [])
+                    ground_truth = human_annotated.get('gt', 'unknown')
+                    annos = []
+                    for anno_str in preds:
+                        parts = anno_str.split(' ')
+                        if len(parts) != 5:
+                            continue
+                        cx, cy, w, h, score = map(float, parts[1:6])
+                        lbl = MAPPING_CLASSES.get(parts[0], 'unknown')  
+                        x1 = cx - w/2
+                        y1 = cy - h/2
+                        x2 = cx + w/2
+                        y2 = cy + h/2
+                        annos.append(Annotation(
+                            bbox=[x1, y1, x2, y2],
+                            confidence=score,
+                            defect_type=lbl
+                        ))
                     pre_anno = ModelPrediction(
                         model_version= "human",
-                        annotations=[Annotation(
-                            
-                        )]
+                        annotations=annos
                     )
-                    #
-                    #
                     record.pre_annotations.append(pre_anno)
                 
+                # Strip the gs:// URI prefix for img_path as well
+                if img_path.startswith(f"gs://{bucker_name}/"):
+                    img_path = img_path.split(f"gs://{bucker_name}/")[1]
+                elif img_path.startswith("gs://"):
+                    img_path = "/".join(img_path.split("/")[3:])
                 image_bytes = bucket_client.blob(img_path).download_as_bytes()
                 image = Image.open(BytesIO(image_bytes)).convert("RGB")
+                record.width, record.height = image.size
                 for model_idx, model in enumerate(self.models):
-                    prediction = self.inference_with_sahi(model, image, iou_threshold=0.1, confidence_threshold=0.1)
+                    prediction = self.inference_with_sahi(model, image)
                     record.pre_annotations.append(prediction)
                 record.final_pre_annotations = self.merge_predictions(record.pre_annotations)
                 records.append(record)
@@ -118,9 +145,84 @@ class AIVerify:
             logger.error(f"Error making predictions: {str(e)}", exc_info=True)
             raise
     
-    def merge_predictions(self, pre_annotations: List[ModelPrediction]) -> List[Annotation]:
-        # TODO: implement merging logic using nms for overlapping annotations
-        annotations = []
-        for pre_annotation in pre_annotations:
-            annotations.extend(pre_annotation.annotations)
-        return annotations
+    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+        
+        box1_area = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+        box2_area = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
+        
+        union_area = box1_area + box2_area - inter_area
+        if union_area == 0:
+            return 0
+        return inter_area / union_area
+
+    def merge_predictions(self, pre_annotations: List[ModelPrediction], iou_threshold: float = 0.5) -> List[Annotation]:
+        num_models = len(pre_annotations)
+        if num_models == 0:
+            return []
+            
+        all_annos = []
+        for model_idx, pre_annotation in enumerate(pre_annotations):
+            for anno in pre_annotation.annotations:
+                all_annos.append({
+                    "anno": anno,
+                    "model_idx": model_idx
+                })
+                
+        # Sort by confidence descending so max score is always first
+        all_annos.sort(key=lambda x: x["anno"].confidence, reverse=True)
+        
+        groups = []
+        for item in all_annos:
+            anno = item["anno"]
+            
+            # Find a matching group based on IoU overlap
+            matched_group = None
+            for group in groups:
+                rep_bbox = group["items"][0]["anno"].bbox
+                if self._calculate_iou(anno.bbox, rep_bbox) >= iou_threshold:
+                    matched_group = group
+                    break
+            
+            if matched_group is not None:
+                matched_group["items"].append(item)
+            else:
+                groups.append({"items": [item]})
+                
+        final_annotations = []
+        for group in groups:
+            items = group["items"]
+            unique_models = set(item["model_idx"] for item in items)
+            
+            # Condition: (> 0.5) of models must predict this bbox
+            if len(unique_models) / num_models >= 0.5:
+                # Voting for label (majority vote)
+                label_counts = {}
+                for item in items:
+                    lbl = item["anno"].defect_type
+                    label_counts[lbl] = label_counts.get(lbl, 0) + 1
+                    
+                best_label = None
+                max_count = -1
+                for item in items:
+                    lbl = item["anno"].defect_type
+                    if label_counts[lbl] > max_count:
+                        max_count = label_counts[lbl]
+                        best_label = lbl
+                        
+                # Max score is the first item since it's sorted
+                max_score = items[0]["anno"].confidence
+                best_bbox = items[0]["anno"].bbox
+                
+                final_annotations.append(Annotation(
+                    bbox=best_bbox,
+                    confidence=max_score,
+                    defect_type=best_label
+                ))
+                
+        return final_annotations
