@@ -11,7 +11,8 @@ import datetime
 from collections import Counter, defaultdict
 from typing import Dict, Any, Tuple, List
 from utils.logger import get_logger
-from utils.models import SampleInfo
+from utils.schemas import SampleInfo
+from utils.config import config as app_config
 
 logger = get_logger(__name__)
 
@@ -20,8 +21,8 @@ class DatasetManager:
     
     def __init__(self, config: dict = None):
         logger.info("Initializing DatasetManager")
-        self.config = config 
-        self.split_ratio = config['new_split_ratio']
+        self.config = config or app_config.data_management
+        self.split_ratio = self.config.get('new_split_ratio', [0.7, 0.2, 0.1])
 
     @staticmethod
     def _load_coco(path: str) -> Dict[str, Any]:
@@ -39,8 +40,8 @@ class DatasetManager:
 
     @staticmethod
     def _get_primary_class(image_id: int, annotations: List[Dict]) -> str:
-        """Determine the primary class for an image based on its annotations.
-        
+        """
+        Determine the primary class for an image based on its annotations.
         Primary class = the most frequent category_id among the image's annotations.
         If the image has no annotations it is treated as a background/negative sample.
         """
@@ -172,74 +173,137 @@ class DatasetManager:
             logger.error(f"Error splitting data: {str(e)}", exc_info=True)
             raise
 
+    def _combine_coco_dicts(self, coco1: Dict, coco2: Dict) -> Dict:
+        """Helper to combine two COCO dicts and reindex IDs."""
+        categories = coco2.get('categories', coco1.get('categories', []))
+        all_images = []
+        old_to_new_img = {}
+        idx = 1
+        
+        for img in coco1.get('images', []):
+            old_to_new_img[('coco1', img['id'])] = idx
+            new_img = copy.deepcopy(img)
+            new_img['id'] = idx
+            all_images.append(new_img)
+            idx += 1
+            
+        for img in coco2.get('images', []):
+            old_to_new_img[('coco2', img['id'])] = idx
+            new_img = copy.deepcopy(img)
+            new_img['id'] = idx
+            all_images.append(new_img)
+            idx += 1
+            
+        all_annotations = []
+        anno_idx = 1
+        
+        for anno in coco1.get('annotations', []):
+            new_anno = copy.deepcopy(anno)
+            new_anno['id'] = anno_idx
+            new_anno['image_id'] = old_to_new_img[('coco1', anno['image_id'])]
+            all_annotations.append(new_anno)
+            anno_idx += 1
+            
+        for anno in coco2.get('annotations', []):
+            new_anno = copy.deepcopy(anno)
+            new_anno['id'] = anno_idx
+            new_anno['image_id'] = old_to_new_img[('coco2', anno['image_id'])]
+            all_annotations.append(new_anno)
+            anno_idx += 1
+            
+        return {
+            "info": coco2.get('info', {}),
+            "licenses": [],
+            "images": all_images,
+            "annotations": all_annotations,
+            "categories": categories,
+        }
+
     def merge_old_new_data(self, old_data_pth: str, new_data_pth: str) -> str:
-        """Merge old and new COCO annotation files into a single dataset.
-
-        Image and annotation IDs are re-indexed to avoid conflicts.
-
-        Args:
-            old_data_pth: Path to the old COCO JSON.
-            new_data_pth: Path to the new COCO JSON.
-
-        Returns:
-            Path to the merged COCO JSON file.
+        """
+        Merge old and new COCO annotation files into a single dataset.
         """
         try:
             old_coco = self._load_coco(old_data_pth)
             new_coco = self._load_coco(new_data_pth)
 
-            categories = new_coco.get('categories', old_coco.get('categories', []))
+            # split new_coco following new_split_ratio
+            new_train_pth, new_val_pth, new_test_pth = self._split_data_train_val_test(new_data_pth)
+            new_train_coco = self._load_coco(new_train_pth)
+            new_val_coco = self._load_coco(new_val_pth)
+            new_test_coco = self._load_coco(new_test_pth)
 
-            # Combine images, re-index
-            all_images = []
-            old_to_new_img = {}
-            idx = 1
-            for img in old_coco['images']:
-                old_to_new_img[('old', img['id'])] = idx
-                new_img = copy.deepcopy(img)
-                new_img['id'] = idx
-                all_images.append(new_img)
-                idx += 1
-            for img in new_coco['images']:
-                old_to_new_img[('new', img['id'])] = idx
-                new_img = copy.deepcopy(img)
-                new_img['id'] = idx
-                all_images.append(new_img)
-                idx += 1
+            # get data from old_coco
+            # get full train, valid, test from old_coc follow file
+            split_info_file = self.config.get('split_info_file', 'tmp/split_info.json')
+            if not split_info_file:
+                split_info_file = 'tmp/split_info.json'
+                
+            with open(split_info_file, 'r') as f:
+                split_info = json.load(f)
 
-            # Combine annotations, re-index
-            all_annotations = []
-            anno_idx = 1
-            for anno in old_coco['annotations']:
-                new_anno = copy.deepcopy(anno)
-                new_anno['id'] = anno_idx
-                new_anno['image_id'] = old_to_new_img[('old', anno['image_id'])]
-                all_annotations.append(new_anno)
-                anno_idx += 1
-            for anno in new_coco['annotations']:
-                new_anno = copy.deepcopy(anno)
-                new_anno['id'] = anno_idx
-                new_anno['image_id'] = old_to_new_img[('new', anno['image_id'])]
-                all_annotations.append(new_anno)
-                anno_idx += 1
+            # The split info contains file names
+            train_file_names = set(split_info.get('train', []))
+            val_file_names = set(split_info.get('val', []))
+            test_file_names = set(split_info.get('test', []))
 
-            merged = {
-                "info": new_coco.get('info', {}),
-                "licenses": [],
-                "images": all_images,
-                "annotations": all_annotations,
-                "categories": categories,
-            }
+            old_images = old_coco.get('images', [])
+            old_annotations = old_coco.get('annotations', [])
+            categories = old_coco.get('categories', [])
+            info = old_coco.get('info', {})
 
+            old_train_images = [img for img in old_images if img.get('file_name') in train_file_names]
+            old_val_images = [img for img in old_images if img.get('file_name') in val_file_names]
+            old_test_images = [img for img in old_images if img.get('file_name') in test_file_names]
+
+            # get mixing_ratio and random get exact number sample from old_coco (note get full valid, test, only consider ratio for train split)
+            mixing_ratio = self.config.get('mixing_ratio', {})
+            new_data_ratio = mixing_ratio.get('new_data_ratio', 0.4)
+            old_data_ratio = mixing_ratio.get('old_data_ratio', 0.6)
+
+            num_new_train = len(new_train_coco.get('images', []))
+            
+            if new_data_ratio > 0:
+                target_old_train = int(num_new_train * (old_data_ratio / new_data_ratio))
+            else:
+                target_old_train = len(old_train_images)
+
+            # Sample from old_train_images if we have more than needed
+            if len(old_train_images) > target_old_train and target_old_train > 0:
+                old_train_images = random.sample(old_train_images, target_old_train)
+            elif target_old_train == 0:
+                old_train_images = []
+
+            # Build old coco subsets
+            old_train_coco = self._build_coco_subset(old_train_images, old_annotations, categories, info)
+            old_val_coco = self._build_coco_subset(old_val_images, old_annotations, categories, info)
+            old_test_coco = self._build_coco_subset(old_test_images, old_annotations, categories, info)
+
+            # Merge old and new datasets
+            merged_train_coco = self._combine_coco_dicts(old_train_coco, new_train_coco)
+            merged_val_coco = self._combine_coco_dicts(old_val_coco, new_val_coco)
+            merged_test_coco = self._combine_coco_dicts(old_test_coco, new_test_coco)
+
+            # Save the merged datasets
             ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            merged_path = f"tmp/merged_{ts}.json"
-            self._save_coco(merged, merged_path)
+            base_dir = f"tmp/merged_dataset_{ts}"
+            os.makedirs(base_dir, exist_ok=True)
+            
+            train_path = self._save_coco(merged_train_coco, os.path.join(base_dir, "train.json"))
+            val_path = self._save_coco(merged_val_coco, os.path.join(base_dir, "val.json"))
+            test_path = self._save_coco(merged_test_coco, os.path.join(base_dir, "test.json"))
+
+            # Update the global app_config dataset_path for the AI trainer
+            app_config.ai_trainer_configs['dataset_path'] = base_dir
 
             logger.info(
-                f"Merged dataset: {len(old_coco['images'])} old + "
-                f"{len(new_coco['images'])} new = {len(all_images)} total images"
+                f"Merged datasets saved to {base_dir}. "
+                f"Train: {len(merged_train_coco['images'])} imgs, "
+                f"Val: {len(merged_val_coco['images'])} imgs, "
+                f"Test: {len(merged_test_coco['images'])} imgs."
             )
-            return merged_path
+            
+            return base_dir
 
         except Exception as e:
             logger.error(f"Error merging datasets: {str(e)}", exc_info=True)

@@ -12,38 +12,29 @@ from utils.logger import get_logger
 from src.data_processor import DataProcessor
 from src.ai_verify import AIVerify
 from utils.ai_trainer import EnhancedAITrainer
-from src.dataset_manager import DatasetManager
-from utils.models import ImageRecord, VerifyResult, TrainedModel
+from src.data_manager import DatasetManager
+from utils.schemas import ImageRecord, VerifyResult, TrainedModel
 from utils.gcs_utils import push_file_to_gcs
-from utils.label_studio_utils import pull_from_label_studio 
+from utils.label_studio_utils import pull_data_from_label_studio 
 from src.ai_trainer import AITrainer
+from utils.config import config as app_config
+
 logger = get_logger(__name__)
 
 
 class AgenticAIPipeline:
     """Main orchestrator for the agentic AI pipeline."""
     
-    def __init__(self, config_path: str = "./configs/pipeline_config.json"):
+    def __init__(self):
         logger.info("=" * 80)
         logger.info("INITIALIZING AGENTIC AI TEXTILE DEFECT DETECTION PIPELINE")
         logger.info("=" * 80)
-        self._load_config(config_path)
+        self.config = app_config
         self.data_processor = DataProcessor()
-        self.ai_verify = AIVerify(self.config)
-        self.ai_trainer = AITrainer(self.config['training_pipeline']['ai_trainer_configs'])
-        self.data_manager = DatasetManager(self.config['data_management'])
+        self.ai_verify = AIVerify(self.config.ai_verify_config)
+        self.ai_trainer = AITrainer(app_config.ai_trainer_configs)
+        self.data_manager = DatasetManager(app_config.training_pipeline.get('data_merge_config'))
         logger.info("Pipeline components initialized successfully")
-    
-    def _load_config(self, config_path: str):
-        """Load configuration from JSON file."""
-        logger.info(f"Loading configuration from {config_path}")
-        try:
-            with open(config_path, "r") as f:
-                self.config = json.load(f)
-            logger.info("Configuration loaded successfully")
-        except Exception as e:
-            logger.error(f"Error loading configuration: {str(e)}", exc_info=True)
-            raise
         
     def run_prepare_data_pipeline(self) -> bool:
         '''Prepare new data for human review.'''
@@ -69,8 +60,8 @@ class AgenticAIPipeline:
         logger.info("=" * 80)
         try:
             # Pull reviewed data from label studio
-            path_new_annotation_file = pull_from_label_studio()
-            path_old_annotation_file = pull_from_label_studio(is_pull_old_dataset=True)
+            path_new_annotation_file = pull_data_from_label_studio(url=self.config.LABEL_STUDIO_URL, api_key=self.config.LABEL_STUDIO_API_KEY, start=self.config.date['start'], end=self.config.date['end'], project_id=self.config.label_studio_configs['project_id'])
+            path_old_annotation_file = pull_data_from_label_studio(url=self.config.LABEL_STUDIO_URL, api_key=self.config.LABEL_STUDIO_API_KEY, start=self.config.date['start'], end=self.config.date['end'], project_id=self.config.label_studio_configs['project_id'], is_pull_old_dataset=True)
             # Mix new data and old dataset.
             self.data_manager.merge_old_new_data(path_old_annotation_file, path_new_annotation_file)
             # Optuna hyperparameter optimization.

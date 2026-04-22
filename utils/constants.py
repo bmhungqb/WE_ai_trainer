@@ -6,9 +6,9 @@ DEFECT_CLASSES = {
     3: "hard_pleat"
 }
 MAPPING_CLASSES = {
-        "Không có lỗi": "Khong_co_loi",
-        "Anh mau": "Anh_mau",
-        "Loi soi": "Loi_soi",
-        "Nep gap vai": "Nep_gap_vai",
-        "Cham do": "Cham_do"
-    }
+    "Không có lỗi": "Khong_co_loi",
+    "Anh mau": "Anh_mau",
+    "Loi soi": "Loi_soi",
+    "Nep gap vai": "Nep_gap_vai",
+    "Cham do": "Cham_do"
+}

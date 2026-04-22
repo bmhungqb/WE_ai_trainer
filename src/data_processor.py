@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 from utils.logger import get_logger
-from utils.models import SampleInfo, Annotation
+from utils.schemas import SampleInfo, Annotation
 from utils.gcs_utils import init_connect_gcs_bucket
 from datetime import datetime
 logger = get_logger(__name__)

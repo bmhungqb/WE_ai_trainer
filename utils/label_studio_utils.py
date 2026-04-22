@@ -78,7 +78,7 @@ def process_task(task):
         "annos": annos
     }
 
-def pull_data_from_label_studio(url: str = "https://labelstudio.laka.ai", api_key: str = "31d6593ddbaf44e3c013bd0bfe11619326b352a0", project_id: int = 22, start: str = "2026-04-19", end: str = "2026-04-21", is_pull_old_dataset: bool = False):
+def pull_data_from_label_studio(url: str, api_key: str, project_id: int, start: str = "2026-04-19", end: str = "2026-04-21", is_pull_old_dataset: bool = False):
     ls = Client(url, api_key)
     project = ls.get_project(project_id)
     tasks = project.get_tasks()

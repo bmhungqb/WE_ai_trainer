@@ -4,8 +4,6 @@
     "end": "2026-04-20"
   },
   "label_studio_configs": {
-    "url": "https://labelstudio.laka.ai",
-    "api_key": "31d6593ddbaf44e3c013bd0bfe11619326b352a0",
     "project_id": 22
   },
   "data_pipeline": {
@@ -36,15 +34,13 @@
     }
   },
   "training_pipeline": {
-    "mixing_ratio": {
-      "new_data_ratio": 0.4,
-      "old_data_ratio": 0.6,
-      "train_val_test_split": [
-        0.8,
-        0.15,
-        0.05
-      ],
-      "stratified_sampling": true
+    "data_merge_config": {
+      "mixing_ratio":{
+        "new_data_ratio": 0.4,
+        "old_data_ratio": 0.6,
+        "new_split_ratio": [0.7, 0.2, 0.1]
+      },
+      "split_info_file": ""
     },
     "ai_trainer_configs":{
       "dataset_path": "",

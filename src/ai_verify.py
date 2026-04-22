@@ -11,7 +11,7 @@ import json
 from io import BytesIO
 from PIL import Image
 from utils.logger import get_logger
-from utils.models import SampleInfo, Annotation, VerifyResult, ModelPrediction
+from utils.schemas import SampleInfo, Annotation, VerifyResult, ModelPrediction
 from utils.gcs_utils import init_connect_gcs_bucket
 
 from sahi import AutoDetectionModel
