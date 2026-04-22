@@ -11,12 +11,12 @@ import json
 from io import BytesIO
 from PIL import Image
 from utils.logger import get_logger
-from utils.schemas import SampleInfo, Annotation, VerifyResult, ModelPrediction
+from utils.schemas import SampleInfo, Annotation, VerifyResult, ModelPrediction, VerifiedModel
 from utils.gcs_utils import init_connect_gcs_bucket
 
 from sahi import AutoDetectionModel
 from sahi.predict import get_sliced_prediction
-from rfdetr import RFDETRMedium
+from rfdetr import RFDETRMedium, RFDETRLarge
 from rfdetr_plus import RFDETRXLarge
 
 from utils.constants import DEFECT_CLASSES, MAPPING_CLASSES
@@ -28,27 +28,33 @@ class AIVerify:
     
     def __init__(self, config: dict):
         logger.info("Initializing AIVerify")
-        self.models = self._init_models(config['data_pipeline']['verify_configs']['models'])
-        self.verify_config = config['data_pipeline']['verify_configs']
+        self.models = self._init_models(config['verify_configs']['models'])
+        self.verify_config = config['verify_configs']
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     def _init_models(self, models_config: list[dict], threshold: float = 0.5) -> list[Any]:
         models = []
         for model_dict in models_config:
+            model = VerifiedModel(
+                model_id=model_dict['model_id'],
+                model_version=model_dict['model_version'],
+            )
             model_type = model_dict['model_type']
             weight_path = model_dict['weight_path']
             if model_type == 'rfdetrMedium':
-                model = RFDETRMedium(pretrain_weights=weight_path)
+                init_model = RFDETRMedium(pretrain_weights=weight_path)
             elif model_type == 'rfdetrXLarge':
-                model = RFDETRXLarge(pretrain_weights=weight_path)
-            model.optimize_for_inference()
-            detection_model_sahi = AutoDetectionModel.from_pretrained(
+                init_model = RFDETRXLarge(pretrain_weights=weight_path)
+            elif model_type == 'rfdetrLarge':
+                init_model = RFDETRLarge(pretrain_weights=weight_path)
+            init_model.optimize_for_inference()
+            model.model = AutoDetectionModel.from_pretrained(
                 model_type="roboflow",
-                model=model,
+                model=init_model,
                 category_mapping=DEFECT_CLASSES,
                 confidence_threshold=threshold,
             )
-            models.append(detection_model_sahi)
+            models.append(model)
         logger.info(f"Initialized {len(models)} detection models.")
         return models   
     
@@ -67,12 +73,12 @@ class AIVerify:
     def inference_with_sahi(self, model: Any, image: Image) -> ModelPrediction:
         result = get_sliced_prediction(
             image,
-            model,
+            model.model,
             slice_height=512,
             slice_width=512,
             verbose=False,
         )
-        model_version = model.__class__.__name__
+        model_version = model.model_version
         annotations = self._convert_sahi_to_annotations(result)
         return ModelPrediction(
             model_version=model_version,

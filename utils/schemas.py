@@ -6,7 +6,7 @@ Provides strong typing and structured data formats across pipeline phases.
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-
+from sahi import AutoDetectionModel
 
 @dataclass
 class Annotation:
@@ -49,4 +49,11 @@ class TrainedModel:
     config: dict
     output_path: str
     results: dict
+
+@dataclass
+class VerifiedModel:
+    """Represents a verified model version."""
+    model_id: str
+    model_version: str
+    model: AutoDetectionModel
     

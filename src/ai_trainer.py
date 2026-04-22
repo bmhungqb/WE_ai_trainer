@@ -6,6 +6,9 @@ Trains multiple model versions and manages model evolution.
 import logging
 import random
 import datetime
+import os
+import pandas as pd
+from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from utils.logger import get_logger
 from utils.schemas import SampleInfo, TrainedModel
@@ -66,7 +69,7 @@ class AITrainer:
             ])
         }
         
-        map50, recall, f1_score = self.train_with_config(optim_config)
+        map50, recall, f1_score = self.train_with_config(optim_config, task_id=trial.number)
         
         return map50, recall, f1_score
     
@@ -88,10 +91,12 @@ class AITrainer:
 
         # Build model
         model = RFDETRMedium(
-            **self.config,
-            dataset_dir=self.config['dataset_path'],
+            **model_kwargs,
+            dataset_dir=self.config.get('dataset_path'),
             log_per_class_metrics=True
         )
+        
+        model.train()
 
         metrics_path = Path(config['output_dir']) / "metrics.csv"
         if metrics_path.exists():
@@ -115,13 +120,15 @@ class AITrainer:
             self.models.append(model_)
             return 0, 0, 0
 
-    def train_with_optuna(self):
+    def train_with_optuna(self, dataset_path: str):
         """Train model with Optuna hyperparameter optimization."""
         logger.info("Training model with Optuna hyperparameter optimization")
         try:
+            if dataset_path:
+                self.config['dataset_path'] = dataset_path
             self.models = []
             study = optuna.create_study(
-                study_name=f"rfdetr-tuning-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                study_name=f"rfdetr-tuning-{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 directions=["maximize", "maximize", "maximize"]
             )
             logger.info(f"Starting hyperparameter optimization with {self.config['n_trials']} trials")

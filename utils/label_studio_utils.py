@@ -4,6 +4,7 @@ from utils.constants import DEFECT_CLASSES
 import datetime
 import os
 import json
+import base64
 
 logger = get_logger(__name__)
 
@@ -12,7 +13,12 @@ label_to_id = {v: k for k, v in DEFECT_CLASSES.items()}
 
 def process_task(task):
     task_id = task['id']
-    image_url = task['data']['image']
+    raw_image = task['data']['image']
+    if 'fileuri=' in raw_image:
+        b64_str = raw_image.split('fileuri=')[-1].split('&')[0]
+        image_url = base64.b64decode(b64_str).decode('utf-8')
+    else:
+        image_url = raw_image
     annotations = task.get("annotations", [])
     if len(annotations) == 0:
         logger.warning(f"Task {task_id} has no annotations")
@@ -131,5 +137,16 @@ def pull_data_from_label_studio(url: str, api_key: str, project_id: int, start: 
     logger.info(f"Saved COCO dataset to {json_path}")
     return json_path
 
-if __name__ == "__main__":
-    pull_data_from_label_studio(is_pull_old_dataset=True)
+def push_new_samples_to_label_studio(url: str, api_key: str, project_id: int, path_to_new_samples_json: str):
+    URL = url + f"/api/projects/{project_id}/import"
+    headers = {
+        "Authorization": f"Token {api_key}",
+    }
+    with open(path_to_new_samples_json, "rb") as f:
+        files = {"file": f}
+        response = requests.post(URL, headers=headers, files=files)
+    if response.status_code != 201:
+        logger.error(f"Failed to push new samples to Label Studio: {response.text}")
+        return False
+    logger.info(f"Successfully pushed {len(response.json())} new samples to Label Studio")
+    return True

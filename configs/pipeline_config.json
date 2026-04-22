@@ -26,6 +26,10 @@
         {
           "model_type": "rfdetrMedium",
           "weight_path": "weights/weight_rfdetr_m_slice_dinov3_v3.pth"  
+        },
+        {
+          "model_type": "rfdetrLarge",
+          "weight_path": "weights/weight_rfdetr_l_slice_dinov3_v3.pth"  
         }
       ]
     },
@@ -53,7 +57,8 @@
         "recall",
         "f1_score"
       ]
-    }
+    },
+    "output_gcs_models": "textile-datasets/auto_training/outputs"
   },
   "logging": {
     "log_dir": "./logs",

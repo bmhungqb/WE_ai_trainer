@@ -21,7 +21,7 @@ class DataProcessor:
     def __init__(self):
         logger.info("Initializing DataProcessor")
     
-    def download_data_from_gcs(self, buckets_info: List[Dict[str, Any]]) -> List[ImageRecord]:
+    def download_data_from_gcs(self, buckets_info: List[Dict[str, Any]]) -> List[SampleInfo]:
         """Connect to Google Cloud Storage and download data info."""
         logger.info(f"Connecting to Google Cloud Storage buckets: {buckets_info} in data_processor")
         try:
@@ -131,7 +131,7 @@ class DataProcessor:
                     }
                 })
             sample["predictions"].append({
-                'model_version': 'finnal_preannotation',
+                'model_version': 'final_preannotation',
                 'result': preds
             })
             records.append(sample)
