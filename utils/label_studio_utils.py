@@ -5,6 +5,8 @@ import datetime
 import os
 import json
 import base64
+import requests
+from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -147,6 +149,6 @@ def push_new_samples_to_label_studio(url: str, api_key: str, project_id: int, pa
         response = requests.post(URL, headers=headers, files=files)
     if response.status_code != 201:
         logger.error(f"Failed to push new samples to Label Studio: {response.text}")
-        return False
+        return False, response.text
     logger.info(f"Successfully pushed {len(response.json())} new samples to Label Studio")
-    return True
+    return True, "success"

@@ -10,24 +10,28 @@
     "gcs_buckets": [
       {
         "gcs_name": "jetson-textile-storage",
-        "start": "2026-04-19",
-        "end": "2026-04-20",
+        "folder_paths": ["FP", "N", "TPRL", "TPWL"],
+        "start": "2026-04-22",
+        "end": "2026-04-22",
         "is_require_anno_file": true
       },
       {
         "gcs_name": "vv3-shadow-data",
-        "start": "2026-04-19",
-        "end": "2026-04-20",
+        "folder_paths": ["images"],
+        "start": "2026-04-22",
+        "end": "2026-04-22",
         "is_require_anno_file": false
       }
     ],  
     "verify_configs": {
       "models": [
         {
+          "model_id": "1",
           "model_type": "rfdetrMedium",
           "weight_path": "weights/weight_rfdetr_m_slice_dinov3_v3.pth"  
         },
         {
+          "model_id": "2",
           "model_type": "rfdetrLarge",
           "weight_path": "weights/weight_rfdetr_l_slice_dinov3_v3.pth"  
         }

@@ -33,6 +33,7 @@ class DataProcessor:
 
             for bucket_info in buckets_info:
                 bucket_name = bucket_info.get("gcs_name")
+                folder_paths = bucket_info.get("folder_paths", [])
                 start_str = bucket_info.get("start")
                 end_str = bucket_info.get("end")
                 is_require_anno = bucket_info.get("is_require_anno_file", False)
@@ -45,8 +46,13 @@ class DataProcessor:
                 start_date = datetime.strptime(start_str, "%Y-%m-%d").date() if start_str else None
                 end_date = datetime.strptime(end_str, "%Y-%m-%d").date() if end_str else None
 
-                # List all blobs in the bucket
-                blobs = list(bucket.list_blobs())
+                # List blobs from specified folder paths
+                blobs = []
+                if folder_paths:
+                    for folder_path in folder_paths:
+                        blobs.extend(list(bucket.list_blobs(prefix=folder_path)))
+                else:
+                    blobs = list(bucket.list_blobs())
                 
                 # Group blobs by their stem (filename without extension)
                 files_by_stem = {}
@@ -104,6 +110,7 @@ class DataProcessor:
 
     def get_label_studio_format_json(self, verified_records: List[SampleInfo]) -> str:
         """Get label studio format json file."""
+        #TODO: improve the logic, instead of pushing all as pre-annotation, consider samples with high confidence score as annotation (without human review).
         records = []
         for record in verified_records:
             sample = {

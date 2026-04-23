@@ -11,7 +11,7 @@ import json
 from io import BytesIO
 from PIL import Image
 from utils.logger import get_logger
-from utils.schemas import SampleInfo, Annotation, VerifyResult, ModelPrediction, VerifiedModel
+from utils.schemas import SampleInfo, Annotation, ModelPrediction, ModelVerifier
 from utils.gcs_utils import init_connect_gcs_bucket
 
 from sahi import AutoDetectionModel
@@ -28,16 +28,18 @@ class AIVerify:
     
     def __init__(self, config: dict):
         logger.info("Initializing AIVerify")
-        self.models = self._init_models(config['verify_configs']['models'])
-        self.verify_config = config['verify_configs']
+        self.config = config
+        self.models = self._init_models(config['models'])
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     def _init_models(self, models_config: list[dict], threshold: float = 0.5) -> list[Any]:
         models = []
         for model_dict in models_config:
-            model = VerifiedModel(
+            verifier = ModelVerifier(
                 model_id=model_dict['model_id'],
-                model_version=model_dict['model_version'],
+                model_version=f"prediction_{model_dict['model_id']}_{model_dict['model_type']}",
+                model=None
             )
             model_type = model_dict['model_type']
             weight_path = model_dict['weight_path']
@@ -48,13 +50,13 @@ class AIVerify:
             elif model_type == 'rfdetrLarge':
                 init_model = RFDETRLarge(pretrain_weights=weight_path)
             init_model.optimize_for_inference()
-            model.model = AutoDetectionModel.from_pretrained(
+            verifier.model = AutoDetectionModel.from_pretrained(
                 model_type="roboflow",
                 model=init_model,
                 category_mapping=DEFECT_CLASSES,
                 confidence_threshold=threshold,
             )
-            models.append(model)
+            models.append(verifier)
         logger.info(f"Initialized {len(models)} detection models.")
         return models   
     
@@ -94,15 +96,15 @@ class AIVerify:
             for record in data:
                 img_path = record.img_path
                 anno_path = record.anno_path
-                bucker_name = record.bucket_name
-                if bucker_name not in list_bucket_client:
-                    list_bucket_client[bucker_name] = init_connect_gcs_bucket(bucker_name)
-                bucket_client = list_bucket_client[bucker_name]
+                bucket_name = record.bucket_name
+                if bucket_name not in list_bucket_client:
+                    list_bucket_client[bucket_name] = init_connect_gcs_bucket(bucket_name)
+                bucket_client = list_bucket_client[bucket_name]
                 
                 if anno_path:
                     # Strip the gs:// URI prefix to get the relative object path
-                    if anno_path.startswith(f"gs://{bucker_name}/"):
-                        anno_path = anno_path.split(f"gs://{bucker_name}/")[1]
+                    if anno_path.startswith(f"gs://{bucket_name}/"):
+                        anno_path = anno_path.split(f"gs://{bucket_name}/")[1]
                     elif anno_path.startswith("gs://"):
                         anno_path = "/".join(anno_path.split("/")[3:])
                     annotation = bucket_client.blob(anno_path).download_as_text()
@@ -134,8 +136,8 @@ class AIVerify:
                     record.pre_annotations.append(pre_anno)
                 
                 # Strip the gs:// URI prefix for img_path as well
-                if img_path.startswith(f"gs://{bucker_name}/"):
-                    img_path = img_path.split(f"gs://{bucker_name}/")[1]
+                if img_path.startswith(f"gs://{bucket_name}/"):
+                    img_path = img_path.split(f"gs://{bucket_name}/")[1]
                 elif img_path.startswith("gs://"):
                     img_path = "/".join(img_path.split("/")[3:])
                 image_bytes = bucket_client.blob(img_path).download_as_bytes()

@@ -1,6 +1,6 @@
 import logging
+from pathlib import Path
 from google.cloud import storage
-
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -19,13 +19,14 @@ def init_connect_gcs_bucket(bucket_name: str = "jetson-textile-storage"):
 def push_file_to_gcs(local_file_path: Path, gcs_destination: str) -> bool:
     bucket = init_connect_gcs_bucket(gcs_destination.split("/")[0])
     try:
-        blob = bucket.blob(gcs_destination)
+        gcs_destination_path = f"{gcs_destination}/{local_file_path.name}"
+        blob = bucket.blob(gcs_destination_path)
         blob.upload_from_filename(str(local_file_path))
         logger.info(f"Pushed {local_file_path} to {gcs_destination}")
-        return True
+        return True, "success"
     except Exception as e:
         logger.error(f"Error pushing file to Google Cloud Storage: {str(e)}", exc_info=True)
-        return False
+        return False, str(e)
 
 def push_folder_to_gcs(local_folder_path: Path, gcs_destination: str) -> bool:
     """Push folder to Google Cloud Storage."""

@@ -51,7 +51,7 @@ class TrainedModel:
     results: dict
 
 @dataclass
-class VerifiedModel:
+class ModelVerifier:
     """Represents a verified model version."""
     model_id: str
     model_version: str
