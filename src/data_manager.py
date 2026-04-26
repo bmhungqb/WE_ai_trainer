@@ -1,6 +1,11 @@
 """
 Dataset manager for handling mixed datasets.
-Manages new vs old data mixing for training.
+Manages merging of new and old data for training with stratified splitting.
+
+This module provides tools for:
+- Stratified splitting of COCO-format datasets
+- Merging datasets with configurable mixing ratios
+- ID re-indexing to maintain COCO format consistency
 """
 
 import json
@@ -9,59 +14,146 @@ import copy
 import random
 import datetime
 from collections import Counter, defaultdict
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional, Set
 from utils.logger import get_logger
 from utils.schemas import SampleInfo
 from utils.config import config as app_config
 
 logger = get_logger(__name__)
 
+# Constants
+_BACKGROUND_CLASS = "background"
+DEFAULT_SPLIT_INFO_PATH = "tmp/split_info.json"
+
+
 class DatasetManager:
-    """Manage dataset composition and versions."""
+    """Manage dataset composition, versioning, and merging.
     
-    def __init__(self, config: dict = None):
+    Handles:
+    - Stratified train/val/test splitting
+    - COCO format dataset manipulation
+    - Merging old and new datasets with configurable ratios
+    - ID reindexing to maintain COCO format consistency
+    """
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """Initialize DatasetManager with configuration.
+        
+        Args:
+            config: Configuration dictionary with:
+                - new_split_ratio: [train_ratio, val_ratio, test_ratio]
+                - split_info_file: Path to split info file (optional)
+                - mixing_ratio: {new_data_ratio, old_data_ratio}
+        """
         logger.info("Initializing DatasetManager")
         self.config = config or app_config.data_management
         self.split_ratio = self.config.get('new_split_ratio', [0.7, 0.2, 0.1])
+        self._validate_split_ratio()
+
+    def _validate_split_ratio(self) -> None:
+        """Validate that split ratios sum to 1.0.
+        
+        Raises:
+            AssertionError: If ratios don't sum to 1.0
+        """
+        train_r, val_r, test_r = self.split_ratio
+        assert abs(train_r + val_r + test_r - 1.0) < 1e-6, (
+            f"Split ratios must sum to 1.0, got {train_r + val_r + test_r}"
+        )
 
     @staticmethod
     def _load_coco(path: str) -> Dict[str, Any]:
-        """Load a COCO-format JSON file."""
-        with open(path, 'r') as f:
-            return json.load(f)
+        """Load a COCO-format JSON annotation file.
+        
+        Args:
+            path: Path to COCO JSON file
+            
+        Returns:
+            Dictionary containing COCO data
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            json.JSONDecodeError: If file is not valid JSON
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"COCO file not found: {path}")
+        try:
+            with open(path, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in {path}: {e}")
+            raise
 
     @staticmethod
     def _save_coco(data: Dict[str, Any], path: str) -> str:
-        """Save a COCO-format JSON file, creating dirs as needed."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-        return path
+        """Save data in COCO format to JSON file.
+        
+        Creates parent directories as needed.
+        
+        Args:
+            data: COCO format dictionary
+            path: Output file path
+            
+        Returns:
+            The path where file was saved
+            
+        Raises:
+            IOError: If file cannot be written
+        """
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            return path
+        except IOError as e:
+            logger.error(f"Failed to save COCO file to {path}: {e}")
+            raise
 
     @staticmethod
-    def _get_primary_class(image_id: int, annotations: List[Dict]) -> str:
+    def _get_primary_class(image_id: int, image_annotations: List[Dict[str, Any]]) -> str:
+        """Determine the primary (most frequent) class for an image.
+        
+        Used for stratified splitting - assigns images to splits based on their
+        most common defect type. Background images (no annotations) are marked as background.
+        
+        Args:
+            image_id: Image ID to find primary class for
+            image_annotations: List of all annotations in dataset
+            
+        Returns:
+            Category ID as string, or "background" if no annotations
         """
-        Determine the primary class for an image based on its annotations.
-        Primary class = the most frequent category_id among the image's annotations.
-        If the image has no annotations it is treated as a background/negative sample.
-        """
-        img_annos = [a for a in annotations if a['image_id'] == image_id]
+        img_annos = [a for a in image_annotations if a['image_id'] == image_id]
         if not img_annos:
             return _BACKGROUND_CLASS
         cat_counts = Counter(a['category_id'] for a in img_annos)
-        # Return the category with the highest count (tie-broken arbitrarily)
-        return str(cat_counts.most_common(1)[0][0])
+        # Return the category with the highest count
+        primary_cat = cat_counts.most_common(1)[0][0]
+        return str(primary_cat)
 
     @staticmethod
     def _build_coco_subset(
-        image_entries: List[Dict],
-        all_annotations: List[Dict],
-        categories: List[Dict],
-        info: Dict = None,
+        image_entries: List[Dict[str, Any]],
+        all_annotations: List[Dict[str, Any]],
+        categories: List[Dict[str, Any]],
+        info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Build a new COCO dict for a subset of images, re-indexing IDs."""
+        """Build a COCO dataset from a subset of images with reindexed IDs.
+        
+        Takes a subset of images and reindexes image IDs (1..N) and annotation IDs
+        to maintain COCO format consistency.
+        
+        Args:
+            image_entries: List of image dictionaries to include
+            all_annotations: All annotations (will be filtered to selected images)
+            categories: Categories list from original COCO file
+            info: Optional info dict for COCO metadata
+            
+        Returns:
+            New COCO dictionary with reindexed IDs
+        """
         # Collect the original image IDs that belong to this subset
-        selected_img_ids = {img['id'] for img in image_entries}
+        selected_img_ids: Set[int] = {img['id'] for img in image_entries}
 
         # Re-index images 1..N
         new_images = []

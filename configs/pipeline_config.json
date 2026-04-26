@@ -1,7 +1,7 @@
 {
   "date": {
-    "start": "2026-04-19",
-    "end": "2026-04-20"
+    "start": "2026-04-24",
+    "end": "2026-04-25"
   },
   "label_studio_configs": {
     "project_id": 22
@@ -10,35 +10,24 @@
     "gcs_buckets": [
       {
         "gcs_name": "jetson-textile-storage",
-        "folder_paths": ["FP", "N", "TPRL", "TPWL"],
-        "start": "2026-04-22",
-        "end": "2026-04-22",
+        "folder_paths": ["N"],
         "is_require_anno_file": true
-      },
-      {
-        "gcs_name": "vv3-shadow-data",
-        "folder_paths": ["images"],
-        "start": "2026-04-22",
-        "end": "2026-04-22",
-        "is_require_anno_file": false
       }
     ],  
     "verify_configs": {
+      "image_size": [576, 576],
       "models": [
         {
           "model_id": "1",
           "model_type": "rfdetrMedium",
           "weight_path": "weights/weight_rfdetr_m_slice_dinov3_v3.pth"  
-        },
-        {
-          "model_id": "2",
-          "model_type": "rfdetrLarge",
-          "weight_path": "weights/weight_rfdetr_l_slice_dinov3_v3.pth"  
         }
       ]
     },
     "output_configs": {
-      "gcs_destination": "textile-datasets/datasets/dataset_auto_training"
+      "gcs_bucket_name": "textile-datasets",
+      "gcs_tasks_folder_path": "auto_training/tasks",
+      "gcs_sliced_images_folder_path": "auto_training/data"
     }
   },
   "training_pipeline": {

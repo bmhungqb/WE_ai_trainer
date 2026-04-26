@@ -35,6 +35,10 @@ class AppConfig:
             logger.warning(f"Configuration file not found at {self.config_path}")
 
     @property
+    def date(self):
+        return self.pipeline_config.get("date", {})
+
+    @property
     def data_pipeline(self):
         return self.pipeline_config.get("data_pipeline", {})
 

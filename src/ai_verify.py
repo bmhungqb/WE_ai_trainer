@@ -10,6 +10,12 @@ import torch
 import json
 from io import BytesIO
 from PIL import Image
+from pathlib import Path
+from copy import deepcopy
+import os
+import shutil
+from datetime import datetime
+
 from utils.logger import get_logger
 from utils.schemas import SampleInfo, Annotation, ModelPrediction, ModelVerifier
 from utils.gcs_utils import init_connect_gcs_bucket
@@ -64,13 +70,90 @@ class AIVerify:
         pred_coco_format = prediction.to_coco_annotations()
         annotations = []
         for annotation in pred_coco_format:
-            x1, y1, x2, y2 = annotation['bbox'] 
+            x1, y1, w, h = annotation['bbox'] 
+            x2 = x1 + w
+            y2 = y1 + h
             annotations.append(Annotation(
                 bbox=[x1, y1, x2, y2],
                 confidence=annotation['score'],
                 defect_type=DEFECT_CLASSES.get(annotation['category_id'])
             ))
         return annotations
+    
+    def _download_gcs_blob(self, bucket_client, blob_path: str, bucket_name: str, is_binary: bool = True) -> Any:
+        """Safely download a blob from GCS with validation.
+        
+        Args:
+            bucket_client: GCS bucket client object
+            blob_path: Path to the blob (without gs://bucket/ prefix)
+            bucket_name: Name of the bucket
+            is_binary: If True, download as bytes; if False, download as text
+            
+        Returns:
+            Downloaded content (bytes or str) or None if download fails
+            
+        Raises:
+            None - logs errors and returns None
+        """
+        try:
+            blob = bucket_client.blob(blob_path)
+            
+            # Check if blob exists
+            if not blob.exists():
+                logger.error(f"Blob does not exist: gs://{bucket_name}/{blob_path}")
+                return None
+            
+            # Download content
+            if is_binary:
+                content = blob.download_as_bytes()
+                if not content or len(content) == 0:
+                    logger.error(f"Downloaded empty binary data from gs://{bucket_name}/{blob_path}")
+                    return None
+            else:
+                content = blob.download_as_text()
+                if not content:
+                    logger.warning(f"Downloaded empty text data from gs://{bucket_name}/{blob_path}")
+                    return None
+            
+            logger.debug(f"Successfully downloaded {len(content) if isinstance(content, bytes) else len(content.encode())} bytes from gs://{bucket_name}/{blob_path}")
+            return content
+            
+        except Exception as e:
+            logger.error(f"Failed to download gs://{bucket_name}/{blob_path}: {str(e)}")
+            return None
+    
+    def _get_bbox_intersection(self, bbox: List[float], slice_coords: Dict[str, float]) -> Tuple[List[float], bool]:
+        """
+        Get the intersection of a bbox with a slice region and transform to slice coordinates.
+        
+        Args:
+            bbox: [x1, y1, x2, y2] in original image coordinates
+            slice_coords: {x_min, y_min, x_max, y_max} - slice boundaries in original image
+            
+        Returns:
+            Tuple of (transformed_bbox in slice coords, has_intersection)
+        """
+        x1_orig, y1_orig, x2_orig, y2_orig = bbox
+        x_min, y_min, x_max, y_max = slice_coords['x_min'], slice_coords['y_min'], slice_coords['x_max'], slice_coords['y_max']
+        
+        # Check if bbox intersects with slice
+        intersects = not (x2_orig < x_min or x1_orig > x_max or y2_orig < y_min or y1_orig > y_max)
+        if not intersects:
+            return None, False
+        
+        # Calculate intersection
+        x1_inter = max(x1_orig, x_min)
+        y1_inter = max(y1_orig, y_min)
+        x2_inter = min(x2_orig, x_max)
+        y2_inter = min(y2_orig, y_max)
+        
+        # Transform to slice coordinates
+        x1_slice = x1_inter - x_min
+        y1_slice = y1_inter - y_min
+        x2_slice = x2_inter - x_min
+        y2_slice = y2_inter - y_min
+        
+        return [x1_slice, y1_slice, x2_slice, y2_slice], True
     
     def inference_with_sahi(self, model: Any, image: Image) -> ModelPrediction:
         result = get_sliced_prediction(
@@ -87,7 +170,7 @@ class AIVerify:
             annotations=annotations,
         )
         
-    def predict_with_models(self, data: List[SampleInfo]) -> List[SampleInfo]:
+    def predict_with_models(self, data: List[SampleInfo], output_local_path: Path, gcs_path: str) -> List[SampleInfo]:
         """Make predictions with multiple models on the data."""
         logger.info(f"Making predictions with {len(self.models)} models")
         try:
@@ -97,57 +180,226 @@ class AIVerify:
                 img_path = record.img_path
                 anno_path = record.anno_path
                 bucket_name = record.bucket_name
+                
+                is_slice = False
+                
                 if bucket_name not in list_bucket_client:
                     list_bucket_client[bucket_name] = init_connect_gcs_bucket(bucket_name)
                 bucket_client = list_bucket_client[bucket_name]
                 
-                if anno_path:
-                    # Strip the gs:// URI prefix to get the relative object path
-                    if anno_path.startswith(f"gs://{bucket_name}/"):
-                        anno_path = anno_path.split(f"gs://{bucket_name}/")[1]
-                    elif anno_path.startswith("gs://"):
-                        anno_path = "/".join(anno_path.split("/")[3:])
-                    annotation = bucket_client.blob(anno_path).download_as_text()
-                    human_annotated = json.loads(annotation)
-
-                    # logic to pre-process human annotations
-                    preds = human_annotated.get('pos', [])
-                    ground_truth = human_annotated.get('gt', 'unknown')
-                    annos = []
-                    for anno_str in preds:
-                        parts = anno_str.split(' ')
-                        if len(parts) != 5:
-                            continue
-                        cx, cy, w, h, score = map(float, parts[1:6])
-                        lbl = MAPPING_CLASSES.get(parts[0], 'unknown')  
-                        x1 = cx - w/2
-                        y1 = cy - h/2
-                        x2 = cx + w/2
-                        y2 = cy + h/2
-                        annos.append(Annotation(
-                            bbox=[x1, y1, x2, y2],
-                            confidence=score,
-                            defect_type=lbl
-                        ))
-                    pre_anno = ModelPrediction(
-                        model_version= "human",
-                        annotations=annos
-                    )
-                    record.pre_annotations.append(pre_anno)
-                
-                # Strip the gs:// URI prefix for img_path as well
+                # handle image: Strip the gs:// URI prefix for img_path
                 if img_path.startswith(f"gs://{bucket_name}/"):
                     img_path = img_path.split(f"gs://{bucket_name}/")[1]
                 elif img_path.startswith("gs://"):
                     img_path = "/".join(img_path.split("/")[3:])
-                image_bytes = bucket_client.blob(img_path).download_as_bytes()
-                image = Image.open(BytesIO(image_bytes)).convert("RGB")
-                record.width, record.height = image.size
-                for model_idx, model in enumerate(self.models):
+                
+                logger.info(f"Downloading image from GCS path: {img_path} in bucket: {bucket_name}")
+                
+                try:
+                    # Validate blob exists before download
+                    blob = bucket_client.blob(img_path)
+                    if not blob.exists():
+                        logger.error(f"Blob does not exist: gs://{bucket_name}/{img_path}")
+                        continue
+                    
+                    # Download image bytes
+                    image_bytes = blob.download_as_bytes()
+                    
+                    # Validate image data
+                    if not image_bytes or len(image_bytes) == 0:
+                        logger.error(f"Downloaded empty image data from gs://{bucket_name}/{img_path}")
+                        continue
+                    
+                    # Try to open and validate image
+                    try:
+                        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+                        record.width, record.height = image.size
+                        logger.info(f"Successfully loaded image {record.id}: {record.width}x{record.height}")
+                    except Exception as img_err:
+                        logger.error(f"Failed to open image {record.id}: {str(img_err)}")
+                        logger.error(f"Image data size: {len(image_bytes)} bytes")
+                        continue
+                        
+                except Exception as download_err:
+                    logger.error(f"Failed to download image from {img_path}: {str(download_err)}")
+                    continue
+                
+                if record.width != self.config['image_size'][0] or record.height != self.config['image_size'][1]:
+                    is_slice = True
+                if record.width != self.config['image_size'][0] or record.height != self.config['image_size'][1]:
+                    is_slice = True
+                # Load annotation if exists
+                human_annotations = []
+                if anno_path:
+                    anno_path_normalized = anno_path
+                    # Strip the gs:// URI prefix to get the relative object path
+                    if anno_path_normalized.startswith(f"gs://{bucket_name}/"):
+                        anno_path_normalized = anno_path_normalized.split(f"gs://{bucket_name}/")[1]
+                    elif anno_path_normalized.startswith("gs://"):
+                        anno_path_normalized = "/".join(anno_path_normalized.split("/")[3:])
+                    
+                    try:
+                        anno_blob = bucket_client.blob(anno_path_normalized)
+                        if not anno_blob.exists():
+                            logger.warning(f"Annotation file does not exist: gs://{bucket_name}/{anno_path_normalized}")
+                        else:
+                            annotation = anno_blob.download_as_text()
+                            if annotation:
+                                try:
+                                    human_annotated = json.loads(annotation)
+                                    
+                                    # Parse human annotations
+                                    preds = human_annotated.get('pos', [])
+                                    for anno_str in preds:
+                                        parts = anno_str.split(' ')
+                                        if len(parts) < 6:
+                                            continue
+                                        cx, cy, w, h, score = map(float, parts[1:])
+                                        lbl = MAPPING_CLASSES.get(parts[0], 'unknown')  
+                                        x1 = (cx - w/2) * record.width
+                                        y1 = (cy - h/2) * record.height
+                                        x2 = (cx + w/2) * record.width
+                                        y2 = (cy + h/2) * record.height
+                                        human_annotations.append(Annotation(
+                                            bbox=[x1, y1, x2, y2],
+                                            confidence=score,
+                                            defect_type=lbl
+                                        ))
+                                    logger.info(f"Loaded {len(human_annotations)} human annotations for {record.id}")
+                                except json.JSONDecodeError as json_err:
+                                    logger.warning(f"Failed to parse annotation JSON for {record.id}: {str(json_err)}")
+                            else:
+                                logger.warning(f"Annotation file is empty: gs://{bucket_name}/{anno_path_normalized}")
+                    except Exception as anno_err:
+                        logger.warning(f"Could not load annotation for {record.id}: {str(anno_err)}")
+                
+                # Slice and create individual records
+                if is_slice:
+                    logger.info(f"Processing sliced image: {record.id}")
+                    output_local_path.mkdir(parents=True, exist_ok=True)
+                    
+                    # Slice image into 576x576 tiles using SAHI
+                    from sahi.slicing import slice_image
+                    sliced_image_result = slice_image(
+                        image=image,
+                        slice_height=576,
+                        slice_width=576,
+                        overlap_height_ratio=0,
+                        overlap_width_ratio=0
+                    )
+                    
+                    # Process each slice as a separate record
+                    slice_count = 0
+                    for sliced_item in sliced_image_result:
+                        # Extract image and metadata from sliced result
+                        if isinstance(sliced_item, dict):
+                            sliced_image = sliced_item.get('image')
+                            starting_pixel = sliced_item.get('starting_pixel')
+                        else:
+                            sliced_image = sliced_item.image if hasattr(sliced_item, 'image') else sliced_item
+                            starting_pixel = sliced_item.starting_pixel if hasattr(sliced_item, 'starting_pixel') else [0, 0]
+                        
+                        if sliced_image is None:
+                            continue
+                        
+                        # Get slice coordinates in original image space
+                        slice_x_min, slice_y_min = starting_pixel
+                        slice_height_actual = sliced_image.height if hasattr(sliced_image, 'height') else sliced_image.shape[0]
+                        slice_width_actual = sliced_image.width if hasattr(sliced_image, 'width') else sliced_image.shape[1]
+                        
+                        # Handle numpy array conversion if needed
+                        if isinstance(sliced_image, np.ndarray):
+                            slice_height_actual, slice_width_actual = sliced_image.shape[:2]
+                            sliced_image = Image.fromarray(sliced_image.astype('uint8'))
+                        
+                        slice_x_max = slice_x_min + slice_width_actual
+                        slice_y_max = slice_y_min + slice_height_actual
+                        
+                        slice_coords = {
+                            'x_min': slice_x_min,
+                            'y_min': slice_y_min,
+                            'x_max': slice_x_max,
+                            'y_max': slice_y_max
+                        }
+                        
+                        # Create a new record for this slice
+                        slice_record = deepcopy(record)
+                        slice_record.id = f"{record.id}_slice_{slice_count:04d}"
+                        slice_record.width = slice_width_actual
+                        slice_record.height = slice_height_actual
+                        slice_record.pre_annotations = []
+                        
+                        # Map human annotations to this slice
+                        slice_human_annos = []
+                        for human_anno in human_annotations:
+                            transformed_bbox, has_intersection = self._get_bbox_intersection(
+                                human_anno.bbox, slice_coords
+                            )
+                            if has_intersection:
+                                slice_human_annos.append(Annotation(
+                                    bbox=transformed_bbox,
+                                    confidence=human_anno.confidence,
+                                    defect_type=human_anno.defect_type
+                                ))
+                        
+                        # Add human annotations for this slice
+                        if slice_human_annos:
+                            pre_anno = ModelPrediction(
+                                model_version="human",
+                                annotations=slice_human_annos
+                            )
+                            slice_record.pre_annotations.append(pre_anno)
+                        
+                        # Run inference on this slice
+                        for model in self.models:
+                            prediction = self.inference_with_sahi(model, sliced_image)
+                            # Transform predictions back to original image coordinates
+                            transformed_annotations = []
+                            for anno in prediction.annotations:
+                                x1_orig = anno.bbox[0] + slice_x_min
+                                y1_orig = anno.bbox[1] + slice_y_min
+                                x2_orig = anno.bbox[2] + slice_x_min
+                                y2_orig = anno.bbox[3] + slice_y_min
+                                transformed_annotations.append(Annotation(
+                                    bbox=[x1_orig, y1_orig, x2_orig, y2_orig],
+                                    confidence=anno.confidence,
+                                    defect_type=anno.defect_type
+                                ))
+                            
+                            if transformed_annotations:
+                                slice_record.pre_annotations.append(ModelPrediction(
+                                    model_version=prediction.model_version,
+                                    annotations=transformed_annotations
+                                ))
+                        
+                        # Merge predictions for this slice
+                        slice_record.final_pre_annotations = self.merge_predictions(slice_record.pre_annotations)
+                        
+                        # Save sliced image
+                        slice_filename = f"{record.id.replace('/', '_')}_{slice_count:04d}.jpg"
+                        slice_path = output_local_path / slice_filename
+                        slice_record.img_path = f"gs://{gcs_path}/{output_local_path.name}/{slice_filename}"
+                        sliced_image.save(str(slice_path))
+                        
+                        # Append this slice as a separate record
+                        records.append(slice_record)
+                        slice_count += 1
+                    continue
+                
+                # Standard processing for non-N folder samples
+                if human_annotations:
+                    pre_anno = ModelPrediction(
+                        model_version="human",
+                        annotations=human_annotations
+                    )
+                    record.pre_annotations.append(pre_anno)
+                
+                for model in self.models:
                     prediction = self.inference_with_sahi(model, image)
                     record.pre_annotations.append(prediction)
                 record.final_pre_annotations = self.merge_predictions(record.pre_annotations)
                 records.append(record)
+            
             return records
         except Exception as e:
             logger.error(f"Error making predictions: {str(e)}", exc_info=True)
