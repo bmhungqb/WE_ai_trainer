@@ -2,29 +2,29 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
-from datetime import datetime
 
-def setup_logger(name: str = "TextileDefectDetection", log_dir: str = "./logs") -> logging.Logger:
+def setup_logger(log_dir: str = "./logs") -> logging.Logger:
     """
-    Configure and return a logger with both file and console handlers.
+    Configure the ROOT logger with both file and console handlers.
+    This ensures ALL loggers throughout the application use the same handlers.
     
     Args:
-        name: Logger name
         log_dir: Directory to store log files
         
     Returns:
-        Configured logger instance
+        Configured root logger instance
     """
     # Create logs directory if it doesn't exist
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
     
-    # Create logger
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    # Configure ROOT logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
     
-    # Remove existing handlers to prevent duplicates
-    logger.handlers.clear()
+    # Check if handlers already exist (prevents duplicate handlers)
+    if root_logger.handlers:
+        return root_logger
     
     # Create formatters
     detailed_formatter = logging.Formatter(
@@ -37,25 +37,34 @@ def setup_logger(name: str = "TextileDefectDetection", log_dir: str = "./logs") 
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # File handler - logs everything
-    log_file = log_path / f"textile_detection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    file_handler = logging.FileHandler(log_file)
+    # File handler - logs everything to a SINGLE file (no timestamp)
+    log_file = log_path / "textile_detection.log"
+    file_handler = logging.FileHandler(log_file, mode='a')  # 'a' for append mode
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(detailed_formatter)
-    logger.addHandler(file_handler)
+    root_logger.addHandler(file_handler)
     
     # Console handler - logs INFO and above
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(simple_formatter)
-    logger.addHandler(console_handler)
+    root_logger.addHandler(console_handler)
     
     # Log initial setup message
-    logger.info(f"Logger initialized. Log file: {log_file}")
+    root_logger.info(f"Logger initialized. Log file: {log_file}")
     
-    return logger
+    return root_logger
 
 
-def get_logger(name: str = "TextileDefectDetection") -> logging.Logger:
-    """Get or create a logger with the given name."""
+def get_logger(name: str = None) -> logging.Logger:
+    """
+    Get a logger instance. If name is provided, returns a named logger
+    (which will inherit handlers from root logger). Otherwise returns root logger.
+    
+    Args:
+        name: Logger name (typically __name__)
+        
+    Returns:
+        Logger instance
+    """
     return logging.getLogger(name)
