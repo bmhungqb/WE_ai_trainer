@@ -13,7 +13,7 @@ from pathlib import Path
 from copy import deepcopy
 
 from utils.logger import get_logger
-from utils.schemas import Annotation, ModelPrediction, ModelVerifier
+from utils.schemas import Annotation, ModelPrediction, ModelVerifier, SampleInfo
 from utils.gcs_utils import init_connect_gcs_bucket
 
 from sahi import AutoDetectionModel
