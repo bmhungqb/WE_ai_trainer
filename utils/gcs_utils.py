@@ -1,7 +1,6 @@
-import logging
 from pathlib import Path
 from google.cloud import storage
-from google.cloud.storage import Client, transfer_manager
+from google.cloud.storage import transfer_manager
 import os
 from utils.logger import get_logger
 
@@ -18,7 +17,7 @@ def init_connect_gcs_bucket(bucket_name: str = "jetson-textile-storage"):
         logger.error(f"Error connecting to Google Cloud Storage: {str(e)}", exc_info=True)
         raise   
 
-def push_file_to_gcs(local_file_path: Path, gcs_name: str, gcs_destination: str) -> bool:
+def push_file_to_gcs(local_file_path: Path, gcs_name: str, gcs_destination: str) -> tuple:
     """Push a single file to Google Cloud Storage."""
     bucket = init_connect_gcs_bucket(gcs_name)
     try:

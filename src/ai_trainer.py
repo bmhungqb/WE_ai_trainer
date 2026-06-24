@@ -3,21 +3,16 @@ Enhanced AI Trainer with Optuna optimization and knowledge distillation.
 Trains multiple model versions and manages model evolution.
 """
 
-import logging
-import random
 import datetime
 import os
 import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
 from utils.logger import get_logger
-from utils.schemas import SampleInfo, TrainedModel
+from utils.schemas import TrainedModel
 import optuna
 from rfdetr import RFDETRMedium
 from rfdetr.datasets.aug_config import (
-    AUG_CONSERVATIVE,
     AUG_AGGRESSIVE,
-    AUG_AERIAL,
     AUG_INDUSTRIAL
 )
 from utils.config import config as app_config
@@ -36,22 +31,21 @@ class AITrainer:
     def objective(self, trial: optuna.trial.Trial):
         """Objective function for Optuna hyperparameter optimization."""
         
-        # output
-        output_dir = f"tmp/rfdetr_tunning/trial_{trial.number}"
-        os.makedirs(output_dir, exist_ok=True)  
+        output_dir = f"tmp/rfdetr_tuning/trial_{trial.number}"
+        os.makedirs(output_dir, exist_ok=True)
 
-        # Augmentations
         aug_options = {
             "none": {},
             'industrial': AUG_INDUSTRIAL,
             'aggressive': AUG_AGGRESSIVE,
             'custom': {}
         }
-        
-        # hyperparameter optimization 
+
+        aug_key = trial.suggest_categorical("augmentations", list(aug_options.keys()))
+
         optim_config = {
             "output_dir": output_dir,
-            "aug_config": trial.suggest_categorical("augmentations", list(aug_options.keys())),
+            "aug_config": aug_options[aug_key],
             "lr": trial.suggest_float("lr", 1e-5, 5e-4, log=True),
             "lr_encoder": trial.suggest_float("lr_encoder", 1e-6, 1e-4, log=True),
             "lr_vit_layer_decay": trial.suggest_float("lr_vit_layer_decay", 0.6, 0.95),
@@ -89,7 +83,25 @@ class AITrainer:
             }
         )
 
-        # Build model
+        model_kwargs = {
+            "lr": config["lr"],
+            "lr_encoder": config["lr_encoder"],
+            "lr_vit_layer_decay": config["lr_vit_layer_decay"],
+            "lr_component_decay": config["lr_component_decay"],
+            "weight_decay": config["weight_decay"],
+            "warmup_epochs": config["warmup_epochs"],
+            "ema_decay": config["ema_decay"],
+            "lr_scheduler": config["lr_scheduler"],
+            "cls_loss_coef": config["cls_loss_coef"],
+            "bbox_loss_coef": config["bbox_loss_coef"],
+            "giou_loss_coef": config["giou_loss_coef"],
+            "output_dir": config["output_dir"],
+        }
+        if config.get("pretrained_weights"):
+            model_kwargs["pretrain_weights"] = config["pretrained_weights"]
+        if config.get("aug_config"):
+            model_kwargs["aug_config"] = config["aug_config"]
+
         model = RFDETRMedium(
             **model_kwargs,
             dataset_dir=self.config.get('dataset_path'),

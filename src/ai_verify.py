@@ -3,7 +3,6 @@ AI verification module for textile defect detection.
 Classifies data, makes predictions with multiple models, and performs voting.
 """
 
-import logging
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import torch
@@ -12,12 +11,9 @@ from io import BytesIO
 from PIL import Image
 from pathlib import Path
 from copy import deepcopy
-import os
-import shutil
-from datetime import datetime
 
 from utils.logger import get_logger
-from utils.schemas import SampleInfo, Annotation, ModelPrediction, ModelVerifier
+from utils.schemas import Annotation, ModelPrediction, ModelVerifier
 from utils.gcs_utils import init_connect_gcs_bucket
 
 from sahi import AutoDetectionModel
@@ -55,6 +51,8 @@ class AIVerify:
                 init_model = RFDETRXLarge(pretrain_weights=weight_path)
             elif model_type == 'rfdetrLarge':
                 init_model = RFDETRLarge(pretrain_weights=weight_path)
+            else:
+                raise ValueError(f"Unknown model_type: {model_type}")
             init_model.optimize_for_inference()
             verifier.model = AutoDetectionModel.from_pretrained(
                 model_type="roboflow",
@@ -224,8 +222,6 @@ class AIVerify:
                     logger.error(f"Failed to download image from {img_path}: {str(download_err)}")
                     continue
                 
-                if record.width != self.config['image_size'][0] or record.height != self.config['image_size'][1]:
-                    is_slice = True
                 if record.width != self.config['image_size'][0] or record.height != self.config['image_size'][1]:
                     is_slice = True
                 # Load annotation if exists

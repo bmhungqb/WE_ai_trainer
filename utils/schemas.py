@@ -11,7 +11,7 @@ from sahi import AutoDetectionModel
 @dataclass
 class Annotation:
     """Represents a single defect annotation."""
-    bbox: List[float]  # [x, y, width, height]
+    bbox: List[float]  # [x1, y1, x2, y2]
     confidence: float
     defect_type: str = None
 

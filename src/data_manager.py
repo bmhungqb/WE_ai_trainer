@@ -16,7 +16,6 @@ import datetime
 from collections import Counter, defaultdict
 from typing import Dict, Any, Tuple, List, Optional, Set
 from utils.logger import get_logger
-from utils.schemas import SampleInfo
 from utils.config import config as app_config
 
 logger = get_logger(__name__)
@@ -47,7 +46,11 @@ class DatasetManager:
         """
         logger.info("Initializing DatasetManager")
         self.config = config or app_config.data_management
-        self.split_ratio = self.config.get('new_split_ratio', [0.7, 0.2, 0.1])
+        mixing_ratio = self.config.get('mixing_ratio', {})
+        self.split_ratio = mixing_ratio.get(
+            'new_split_ratio',
+            self.config.get('new_split_ratio', [0.7, 0.2, 0.1])
+        )
         self._validate_split_ratio()
 
     def _validate_split_ratio(self) -> None:
@@ -325,28 +328,44 @@ class DatasetManager:
             new_val_coco = self._load_coco(new_val_pth)
             new_test_coco = self._load_coco(new_test_pth)
 
-            # get data from old_coco
-            # get full train, valid, test from old_coc follow file
-            split_info_file = self.config.get('split_info_file', 'tmp/split_info.json')
-            if not split_info_file:
-                split_info_file = 'tmp/split_info.json'
-                
-            with open(split_info_file, 'r') as f:
-                split_info = json.load(f)
-
-            # The split info contains file names
-            train_file_names = set(split_info.get('train', []))
-            val_file_names = set(split_info.get('val', []))
-            test_file_names = set(split_info.get('test', []))
-
             old_images = old_coco.get('images', [])
             old_annotations = old_coco.get('annotations', [])
             categories = old_coco.get('categories', [])
             info = old_coco.get('info', {})
 
-            old_train_images = [img for img in old_images if img.get('file_name') in train_file_names]
-            old_val_images = [img for img in old_images if img.get('file_name') in val_file_names]
-            old_test_images = [img for img in old_images if img.get('file_name') in test_file_names]
+            split_info_file = self.config.get('split_info_file', '')
+            if split_info_file and os.path.exists(split_info_file):
+                with open(split_info_file, 'r') as f:
+                    split_info = json.load(f)
+                train_file_names = set(split_info.get('train', []))
+                val_file_names = set(split_info.get('val', []))
+                test_file_names = set(split_info.get('test', []))
+                old_train_images = [img for img in old_images if img.get('file_name') in train_file_names]
+                old_val_images = [img for img in old_images if img.get('file_name') in val_file_names]
+                old_test_images = [img for img in old_images if img.get('file_name') in test_file_names]
+            else:
+                logger.info("No split_info_file found — deriving stratified split from old data")
+                annos_by_img = defaultdict(list)
+                for anno in old_annotations:
+                    annos_by_img[anno['image_id']].append(anno)
+                class_to_images: Dict[str, list] = defaultdict(list)
+                for img in old_images:
+                    primary_cls = self._get_primary_class(img['id'], annos_by_img[img['id']])
+                    class_to_images[primary_cls].append(img)
+                train_r, val_r, _ = self.split_ratio
+                old_train_images, old_val_images, old_test_images = [], [], []
+                for cls_images in class_to_images.values():
+                    random.shuffle(cls_images)
+                    n = len(cls_images)
+                    n_train = max(1, round(n * train_r))
+                    n_val = max(0, round(n * val_r))
+                    n_test = n - n_train - n_val
+                    if n_test < 0:
+                        n_val = n - n_train
+                        n_test = 0
+                    old_train_images.extend(cls_images[:n_train])
+                    old_val_images.extend(cls_images[n_train:n_train + n_val])
+                    old_test_images.extend(cls_images[n_train + n_val:])
 
             # get mixing_ratio and random get exact number sample from old_coco (note get full valid, test, only consider ratio for train split)
             mixing_ratio = self.config.get('mixing_ratio', {})

@@ -53,7 +53,7 @@ def process_task(task):
         label_name = res["value"]["rectanglelabels"][0]
 
         if label_name not in label_to_id:
-            print(f"WARNING: '{label_name}' not in predefined classes, skipping.")
+            logger.warning(f"'{label_name}' not in predefined classes, skipping.")
             continue
 
         cat_id = label_to_id[label_name]
