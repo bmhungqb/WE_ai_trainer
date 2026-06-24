@@ -11,7 +11,7 @@ from utils.logger import get_logger
 from utils.schemas import TrainedModel
 import optuna
 from rfdetr import RFDETRMedium
-from rfdetr.datasets.aug_config import (
+from rfdetr.datasets.aug_configs import (
     AUG_AGGRESSIVE,
     AUG_INDUSTRIAL
 )
