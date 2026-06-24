@@ -2,7 +2,10 @@ from pathlib import Path
 from google.cloud import storage
 from google.cloud.storage import transfer_manager
 import os
+from dotenv import load_dotenv
 from utils.logger import get_logger
+
+load_dotenv()
 
 logger = get_logger(__name__)
 

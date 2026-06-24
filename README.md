@@ -57,14 +57,9 @@ GCS (raw images) ──> DataProcessor ──> AIVerify (RF-DETR predictions + S
    cp .env.example .env
    ```
    Fill in your credentials:
+   - `GOOGLE_APPLICATION_CREDENTIALS` - Path to GCS service account JSON key file
    - `LABEL_STUDIO_API_KEY` - API key for Label Studio
    - `LABEL_STUDIO_URL` - Label Studio server URL
-
-4. **Authenticate with Google Cloud Storage:**
-   ```bash
-   gcloud auth application-default login
-   ```
-   GCS uses [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials) — no API key needed.
 
 ## Usage
 
