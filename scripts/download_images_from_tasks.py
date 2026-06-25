@@ -6,7 +6,10 @@ Images are downloaded from GCS and saved locally, organized by folder name.
 import json
 import argparse
 from pathlib import Path
+from dotenv import load_dotenv
 from google.cloud import storage
+
+load_dotenv()
 
 
 def download_images(input_path: str, output_dir: str = "tmp/downloaded_images"):
