@@ -65,6 +65,8 @@ def _parse_pos_entries(pos) -> list:
 
     parsed = []
     for entry in entries:
+        if not isinstance(entry, str):
+            continue
         parts = entry.strip().split(" ")
         if len(parts) < 6:
             continue
@@ -117,7 +119,7 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
             logger.warning(f"Missing {pred_path}; {version} annotations will be empty")
             rfdetr_predictions[version] = {}
 
-    merged, missing_rfdetr = 0, 0
+    merged, skipped, missing_rfdetr = 0, 0, 0
     for json_path in sorted(dataset_path.rglob("*.json")):
         image_path = next(
             (json_path.with_suffix(ext) for ext in IMAGE_EXTS if json_path.with_suffix(ext).exists()),
@@ -125,13 +127,24 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
         )
         if image_path is None:
             logger.warning(f"No image found for {json_path}, skipping")
+            skipped += 1
             continue
 
-        with open(json_path, "r") as f:
-            sample = json.load(f)
+        try:
+            with open(json_path, "r") as f:
+                sample = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Broken JSON {json_path}, skipping: {e}")
+            skipped += 1
+            continue
 
-        with Image.open(image_path) as img:
-            width, height = img.size
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+        except Exception as e:
+            logger.warning(f"Broken image {image_path}, skipping: {e}")
+            skipped += 1
+            continue
 
         folder = image_path.parent.name
         rel_image = f"{folder}/{image_path.name}"
@@ -159,7 +172,10 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
 
         merged += 1
 
-    logger.info(f"Merged {merged} samples into {output_path} ({missing_rfdetr} missing rfdetr predictions)")
+    logger.info(
+        f"Merged {merged} samples into {output_path} "
+        f"({skipped} skipped due to broken files, {missing_rfdetr} missing rfdetr predictions)"
+    )
     return merged
 
 
