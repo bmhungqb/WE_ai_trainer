@@ -48,6 +48,14 @@ python scripts/download_dataset.py \
 Dates are matched against each blob's GCS `time_created`. Add `--limit N` to
 grab just a few samples for a quick smoke test. Output: `dataset/TPWL/*.jpg|.json`, `dataset/TPRL/*.png|.json`.
 
+Each downloaded JSON is stamped with `_captured_at` (the blob's capture
+date) for the time filter in step 5. If you have a `dataset/` downloaded
+before this field existed, backfill it without re-downloading images:
+
+```bash
+python scripts/backfill_capture_time.py --dataset dataset --folders TPWL TPRL
+```
+
 ## 2. Validate dataset
 
 ```bash
@@ -103,8 +111,9 @@ Combines ground truth, production, and both RFDETR prediction sets into
 python scripts/build_html.py --results results --output html
 ```
 
-Generates `html/index.html` (gallery, searchable/filterable by folder) and
-`html/detail.html` (per-image view with independently toggleable layers:
+Generates `html/index.html` (gallery, searchable by filename and filterable
+by folder, defect class, and capture date range) and `html/detail.html`
+(per-image view with independently toggleable layers:
 Ground Truth/green, Production/blue, RFDETR v1/orange, RFDETR v2/red; hover a
 box to see class, confidence, and source).
 
@@ -130,7 +139,8 @@ IoU-matched precision/recall/F1 for `production`, `rfdetr_v1`, and
 
 ```
 scripts/
-├── download_dataset.py    # Task 1
+├── download_dataset.py       # Task 1
+├── backfill_capture_time.py  # backfills _captured_at into older dataset/ downloads
 ├── validate_dataset.py    # Task 2
 ├── inference.py            # Task 3 (GPU)
 ├── merge_annotations.py    # Task 4

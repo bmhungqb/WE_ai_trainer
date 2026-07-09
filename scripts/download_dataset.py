@@ -29,6 +29,7 @@ Usage:
 
 import argparse
 import datetime
+import json
 import sys
 from pathlib import Path
 
@@ -91,8 +92,18 @@ def download_dataset(output_dir: str, folders: list, start_date: str, end_date: 
             local_json = folder_dir / f"{Path(filename).stem}.json"
 
             try:
+                sample = json.loads(json_blob.download_as_text())
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"SKIP (broken JSON): {folder}/{filename} - {e}")
+                skipped += 1
+                continue
+
+            sample["_captured_at"] = sample_date.isoformat()
+
+            try:
                 image_blob.download_to_filename(str(local_image))
-                json_blob.download_to_filename(str(local_json))
+                with open(local_json, "w") as f:
+                    json.dump(sample, f)
                 downloaded += 1
                 logger.info(f"OK: {folder}/{filename} ({sample_date})")
             except Exception as e:

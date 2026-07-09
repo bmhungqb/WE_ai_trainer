@@ -52,8 +52,9 @@ INDEX_HTML = """<!doctype html>
   body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #111; color: #eee; }
   header { padding: 16px 24px; background: #1a1a1a; border-bottom: 1px solid #333; position: sticky; top: 0; }
   h1 { font-size: 18px; margin: 0 0 12px; }
-  .controls { display: flex; gap: 12px; flex-wrap: wrap; }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
   input, select { padding: 8px 10px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; font-size: 14px; }
+  .field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #999; }
   .count { color: #999; font-size: 13px; margin-left: 4px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding: 20px; }
   .card { background: #1a1a1a; border-radius: 8px; overflow: hidden; border: 1px solid #2a2a2a; cursor: pointer; transition: transform 0.1s; }
@@ -70,6 +71,9 @@ INDEX_HTML = """<!doctype html>
   <div class="controls">
     <input id="search" type="text" placeholder="Search by filename...">
     <select id="folder-filter"><option value="">All folders</option></select>
+    <select id="class-filter"><option value="">All classes</option></select>
+    <label class="field">From <input id="date-from" type="date"></label>
+    <label class="field">To <input id="date-to" type="date"></label>
   </div>
 </header>
 <div class="grid" id="grid"></div>
@@ -82,14 +86,32 @@ INDEX_HTML = """<!doctype html>
     folderSelect.appendChild(opt);
   }
 
+  const classes = [...new Set(RFDETR_DATA.flatMap(r => r.classes))].sort();
+  const classSelect = document.getElementById('class-filter');
+  for (const c of classes) {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = c;
+    classSelect.appendChild(opt);
+  }
+
+  const searchInput = document.getElementById('search');
+  const dateFrom = document.getElementById('date-from');
+  const dateTo = document.getElementById('date-to');
+
   function render() {
-    const q = document.getElementById('search').value.toLowerCase();
+    const q = searchInput.value.toLowerCase();
     const folder = folderSelect.value;
+    const cls = classSelect.value;
+    const from = dateFrom.value;
+    const to = dateTo.value;
     const grid = document.getElementById('grid');
     grid.innerHTML = '';
     const filtered = RFDETR_DATA.filter(r =>
       (!folder || r.folder === folder) &&
-      (!q || r.filename.toLowerCase().includes(q))
+      (!q || r.filename.toLowerCase().includes(q)) &&
+      (!cls || r.classes.includes(cls)) &&
+      (!from || (r.capturedAt && r.capturedAt >= from)) &&
+      (!to || (r.capturedAt && r.capturedAt <= to))
     );
     document.getElementById('count').textContent = `(${filtered.length} of ${RFDETR_DATA.length})`;
     for (const r of filtered) {
@@ -100,14 +122,17 @@ INDEX_HTML = """<!doctype html>
         <img src="../results/${r.image}" loading="lazy">
         <div class="meta">
           <div class="name">${r.filename}</div>
-          <div class="folder">${r.folder}</div>
+          <div class="folder">${r.folder}${r.capturedAt ? ' &middot; ' + r.capturedAt : ''}</div>
         </div>`;
       grid.appendChild(card);
     }
   }
 
-  document.getElementById('search').addEventListener('input', render);
+  searchInput.addEventListener('input', render);
   folderSelect.addEventListener('change', render);
+  classSelect.addEventListener('change', render);
+  dateFrom.addEventListener('change', render);
+  dateTo.addEventListener('change', render);
   render();
 </script>
 </body>
@@ -160,7 +185,8 @@ DETAIL_HTML = """<!doctype html>
   if (!record) {
     document.getElementById('title').textContent = 'Sample not found';
   } else {
-    document.getElementById('title').textContent = `${record.folder} / ${record.filename}`;
+    document.getElementById('title').textContent = `${record.folder} / ${record.filename}` +
+      (record.capturedAt ? ` (${record.capturedAt})` : '');
     const img = document.getElementById('image');
     img.src = `../results/${record.image}`;
 
@@ -226,11 +252,20 @@ def build_manifest(results_dir: str) -> list:
         with open(json_path, "r") as f:
             record = json.load(f)
         folder, filename = record["image"].split("/", 1)
+        annotations = record["annotations"]
+        classes = sorted({
+            box["class"]
+            for boxes in annotations.values()
+            for box in boxes
+            if box.get("class")
+        })
         manifest.append({
             "folder": folder,
             "filename": filename,
             "image": record["image"],
-            "annotations": record["annotations"],
+            "capturedAt": record.get("captured_at"),
+            "classes": classes,
+            "annotations": annotations,
         })
     return manifest
 

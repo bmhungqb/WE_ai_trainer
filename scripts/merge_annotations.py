@@ -156,6 +156,7 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
 
         merged_record = {
             "image": rel_image,
+            "captured_at": sample.get("_captured_at"),
             "annotations": {
                 "production": extract_boxes(sample, width, height, ground_truth=False),
                 "ground_truth": extract_boxes(sample, width, height, ground_truth=True),
