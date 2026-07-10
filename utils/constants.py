@@ -3,7 +3,8 @@ DEFECT_CLASSES = {
     0: 'pleat',
     1: 'stain',
     2: "weaving",
-    3: "hard_pleat"
+    3: "hard_pleat",
+    4: "ignore"
 }
 MAPPING_CLASSES = {
     "Không có lỗi": "Khong_co_loi",
