@@ -28,7 +28,16 @@ logger = get_logger(__name__)
 label_to_id = {v: k for k, v in DEFECT_CLASSES.items()}
 
 
-def pull_sample(url: str, api_key: str, project_id: int, limit: int | None, output_path: str, page_size: int = 50):
+def pull_sample(
+    url: str,
+    api_key: str,
+    project_id: int,
+    limit: int | None,
+    output_path: str,
+    page_size: int = 50,
+    created_after: datetime.date | None = None,
+    created_before: datetime.date | None = None,
+):
     ls = Client(url, api_key)
     project = ls.get_project(project_id)
 
@@ -55,6 +64,18 @@ def pull_sample(url: str, api_key: str, project_id: int, limit: int | None, outp
         scanned += len(tasks)
 
         for task in tasks:
+            if created_after is not None or created_before is not None:
+                created_at_str = task.get("created_at")
+                if not created_at_str:
+                    continue
+                created_date = datetime.datetime.fromisoformat(
+                    created_at_str.replace("Z", "+00:00")
+                ).date()
+                if created_after is not None and created_date < created_after:
+                    continue
+                if created_before is not None and created_date > created_before:
+                    continue
+
             sample = process_task(task)
             if not sample or not sample["annos"]:
                 continue  # skip negative / unannotated samples
@@ -112,6 +133,12 @@ def main():
         "--limit", type=int, default=None, help="Max number of annotated samples to pull (default: all)"
     )
     parser.add_argument(
+        "--created-after", type=str, default=None, help="Only pull tasks created on/after this date (YYYY-MM-DD)"
+    )
+    parser.add_argument(
+        "--created-before", type=str, default=None, help="Only pull tasks created on/before this date (YYYY-MM-DD)"
+    )
+    parser.add_argument(
         "--output",
         default=f"tmp/annotations_project23_sample_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
     )
@@ -122,7 +149,17 @@ def main():
     if not url or not api_key:
         raise SystemExit("LABEL_STUDIO_URL / LABEL_STUDIO_API_KEY not set (check .env)")
 
-    path = pull_sample(url, api_key, args.project_id, args.limit, args.output)
+    created_after = (
+        datetime.datetime.strptime(args.created_after, "%Y-%m-%d").date() if args.created_after else None
+    )
+    created_before = (
+        datetime.datetime.strptime(args.created_before, "%Y-%m-%d").date() if args.created_before else None
+    )
+
+    path = pull_sample(
+        url, api_key, args.project_id, args.limit, args.output,
+        created_after=created_after, created_before=created_before,
+    )
 
     print(f"Done. Output: {path}")
 
