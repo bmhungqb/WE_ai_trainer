@@ -98,7 +98,7 @@ def main():
     logger.info(f"Verified {len(verified_records)} records")
 
     # Step 3: format predictions as a Label Studio task JSON, saved locally only
-    json_path = output_dir / f"tasks_{args.start_date}_{args.end_date}.json"
+    json_path = output_dir / f"tasks_{args.folder}_{args.start_date}_{args.end_date}.json"
     data_processor.get_label_studio_format_json(verified_records, json_path)
     logger.info(f"✓ Wrote {json_path} (local only, not pushed to GCS or Label Studio)")
     return 0
