@@ -10,9 +10,13 @@ import argparse
 import datetime
 import json
 import os
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from label_studio_sdk import Client
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.label_studio_utils import process_task
 from utils.constants import DEFECT_CLASSES
