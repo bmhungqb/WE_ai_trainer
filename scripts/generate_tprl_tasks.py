@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -25,6 +26,23 @@ from src.data_processor import DataProcessor
 from src.ai_verify import AIVerify
 
 load_dotenv()
+
+
+def load_done_samples(json_path: Path) -> tuple[list, set]:
+    """Load already-written Label Studio samples from a prior (possibly interrupted) run.
+
+    Returns (samples, done_img_paths) so a re-run can skip images already processed
+    instead of re-downloading and re-inferring them from scratch.
+    """
+    if not json_path.exists():
+        return [], set()
+    try:
+        with open(json_path) as f:
+            samples = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return [], set()
+    done_img_paths = {s["data"]["image"] for s in samples if s.get("data", {}).get("image")}
+    return samples, done_img_paths
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,22 +103,49 @@ def main():
         logger.error("No samples found for the given folder/date range, aborting")
         return 1
 
-    # Step 2: run AI verification (predictions) on those samples
+    # Resume support: skip images already written to the output JSON by a prior
+    # (possibly interrupted) run of this exact command. Matches record.img_path
+    # against output data.image, which only line up when images aren't sliced
+    # (i.e. already match --image-size, as TPWL/TPRL samples do).
+    json_path = output_dir / f"tasks_{args.folder}_{args.start_date}_{args.end_date}.json"
+    done_samples, done_img_paths = load_done_samples(json_path)
+    if done_img_paths:
+        logger.info(f"Found {len(done_img_paths)} already-processed sample(s) in {json_path}, resuming")
+    remaining_records = [r for r in sample_records if r.img_path not in done_img_paths]
+    logger.info(f"{len(remaining_records)}/{len(sample_records)} sample(s) left to process")
+
+    if not remaining_records:
+        logger.info(f"Nothing left to do, {json_path} is already complete")
+        return 0
+
+    # Step 2: run AI verification (predictions), one record at a time so a crash
+    # only loses the single in-flight record instead of the whole batch.
     logger.info("Step 2: running AI verification...")
     verify_configs = {"image_size": args.image_size, "models": parse_models(args.model)}
     ai_verify = AIVerify(verify_configs)
     slice_images_local_path = output_dir / f"slice_images_{args.folder}_{args.start_date}_{args.end_date}"
-    verified_records = ai_verify.predict_with_models(
-        sample_records,
-        slice_images_local_path,
-        gcs_path=f"{args.bucket}/{args.folder}",  # only used to build slice img_path strings; nothing is uploaded
-    )
-    logger.info(f"Verified {len(verified_records)} records")
 
-    # Step 3: format predictions as a Label Studio task JSON, saved locally only
-    json_path = output_dir / f"tasks_{args.folder}_{args.start_date}_{args.end_date}.json"
-    data_processor.get_label_studio_format_json(verified_records, json_path)
-    logger.info(f"✓ Wrote {json_path} (local only, not pushed to GCS or Label Studio)")
+    all_samples = done_samples
+    for i, record in enumerate(remaining_records, 1):
+        logger.info(f"[{i}/{len(remaining_records)}] inferring {record.img_path}")
+        verified = ai_verify.predict_with_models(
+            [record],
+            slice_images_local_path,
+            gcs_path=f"{args.bucket}/{args.folder}",  # only used to build slice img_path strings; nothing is uploaded
+        )
+        # Step 3: format this record's predictions and append immediately, so
+        # progress survives an interruption instead of being lost with the batch.
+        tmp_json_path = output_dir / f".tmp_single_{args.folder}_{args.start_date}_{args.end_date}.json"
+        data_processor.get_label_studio_format_json(verified, tmp_json_path)
+        with open(tmp_json_path) as f:
+            all_samples.extend(json.load(f))
+        tmp_json_path.unlink(missing_ok=True)
+
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_path, "w") as f:
+            json.dump(all_samples, f, indent=4)
+
+    logger.info(f"✓ Wrote {json_path} ({len(all_samples)} samples, local only, not pushed to GCS or Label Studio)")
     return 0
 
 
