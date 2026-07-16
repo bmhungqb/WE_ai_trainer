@@ -233,6 +233,7 @@ INDEX_HTML = """<!doctype html>
   splitSelect.addEventListener('change', render);
   classSelect.addEventListener('change', render);
   render();
+  window.addEventListener('pageshow', render);
 </script>
 </body>
 </html>

@@ -134,6 +134,7 @@ INDEX_HTML = """<!doctype html>
   dateFrom.addEventListener('change', render);
   dateTo.addEventListener('change', render);
   render();
+  window.addEventListener('pageshow', render);
 </script>
 </body>
 </html>
