@@ -18,6 +18,14 @@ Usage:
         --weights tmp/rfdetr_tuning/trial_0/checkpoint_best_ema.pth \
         --model-type rfdetrMedium \
         --output reports --html-output html_eval
+
+    # for a model trained on fewer classes, pass its output class order:
+    python scripts/evaluate_model.py \
+        --dataset dataset --split valid \
+        --weights weights/weight_stain_weaving_ignore.pth \
+        --model-type rfdetrMedium \
+        --class-names stain,weaving,ignore \
+        --output reports --html-output html_eval
 """
 
 import argparse
@@ -40,7 +48,7 @@ LAYER_LABELS = {
 }
 
 
-def build_model(model_type: str, weight_path: str, confidence_threshold: float):
+def build_model(model_type: str, weight_path: str, confidence_threshold: float, category_mapping: dict):
     from sahi import AutoDetectionModel
     from rfdetr import RFDETRMedium, RFDETRLarge
     from rfdetr_plus import RFDETRXLarge
@@ -58,12 +66,12 @@ def build_model(model_type: str, weight_path: str, confidence_threshold: float):
     return AutoDetectionModel.from_pretrained(
         model_type="roboflow",
         model=init_model,
-        category_mapping=DEFECT_CLASSES,
+        category_mapping=category_mapping,
         confidence_threshold=confidence_threshold,
     )
 
 
-def predict_image(model, image, slice_size: int) -> list:
+def predict_image(model, image, slice_size: int, category_mapping: dict) -> list:
     from sahi.predict import get_sliced_prediction
 
     result = get_sliced_prediction(
@@ -80,7 +88,7 @@ def predict_image(model, image, slice_size: int) -> list:
         boxes.append({
             "bbox": [x1, y1, x1 + w, y1 + h],
             "confidence": annotation["score"],
-            "class": DEFECT_CLASSES.get(annotation["category_id"]),
+            "class": category_mapping.get(annotation["category_id"]),
         })
     return boxes
 
@@ -101,7 +109,7 @@ def load_split(dataset_dir: Path, split: str):
     return coco["images"], gt_by_image
 
 
-def evaluate(dataset_dir: str, splits: list, model, slice_size: int):
+def evaluate(dataset_dir: str, splits: list, model, slice_size: int, category_mapping: dict):
     from PIL import Image
 
     logger = get_logger(__name__)
@@ -120,7 +128,7 @@ def evaluate(dataset_dir: str, splits: list, model, slice_size: int):
 
             try:
                 image = Image.open(local_path).convert("RGB")
-                predicted = predict_image(model, image, slice_size)
+                predicted = predict_image(model, image, slice_size, category_mapping)
             except Exception as e:
                 logger.error(f"[{split}][{i}/{len(images)}] FAIL {rel_path}: {e}")
                 predicted = []
@@ -371,6 +379,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", nargs="+", default=["valid"], choices=["train", "valid"], help="Split(s) to evaluate")
     parser.add_argument("--weights", required=True, help="Path to trained RFDETR checkpoint")
     parser.add_argument("--model-type", default="rfdetrMedium", choices=["rfdetrMedium", "rfdetrLarge", "rfdetrXLarge"])
+    parser.add_argument(
+        "--class-names",
+        default=None,
+        help="Comma-separated class names in the model's output category-id order, e.g. "
+             "'stain,weaving,ignore' for a 3-class model. Defaults to the full DEFECT_CLASSES "
+             "mapping (pleat,stain,weaving,hard_pleat,ignore) if omitted -- only correct for "
+             "models trained with that exact 5-class order.",
+    )
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
     parser.add_argument("--slice-size", type=int, default=576, help="SAHI slice size (match training image size)")
     parser.add_argument("--output", default="reports", help="Directory for prediction JSON")
@@ -384,10 +400,15 @@ def main():
     setup_logger(log_dir=args.log_dir)
     logger = get_logger(__name__)
 
-    logger.info(f"Loading {args.model_type} from {args.weights}")
-    model = build_model(args.model_type, args.weights, args.confidence_threshold)
+    if args.class_names:
+        category_mapping = {i: name.strip() for i, name in enumerate(args.class_names.split(","))}
+    else:
+        category_mapping = DEFECT_CLASSES
 
-    manifest = evaluate(args.dataset, args.split, model, args.slice_size)
+    logger.info(f"Loading {args.model_type} from {args.weights} (classes: {list(category_mapping.values())})")
+    model = build_model(args.model_type, args.weights, args.confidence_threshold, category_mapping)
+
+    manifest = evaluate(args.dataset, args.split, model, args.slice_size, category_mapping)
 
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
