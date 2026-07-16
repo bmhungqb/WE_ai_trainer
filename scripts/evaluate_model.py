@@ -141,6 +141,7 @@ def evaluate(dataset_dir: str, splits: list, model, slice_size: int, category_ma
                 "image": rel_path,
                 "classes": classes,
                 "counts": {"ground_truth": len(ground_truth), "prediction": len(predicted)},
+                "is_wrong": len(ground_truth) != len(predicted),
                 "annotations": {
                     "ground_truth": ground_truth,
                     "prediction": predicted,
@@ -170,6 +171,7 @@ INDEX_HTML = """<!doctype html>
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding: 20px; }
   .card { background: #1a1a1a; border-radius: 8px; overflow: hidden; border: 1px solid #2a2a2a; cursor: pointer; transition: transform 0.1s; }
   .card:hover { transform: translateY(-2px); border-color: #555; }
+  .card.wrong { border-color: #e74c3c; }
   .card img { width: 100%; height: 150px; object-fit: cover; display: block; background: #000; }
   .card .meta { padding: 8px 10px; font-size: 12px; }
   .card .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -177,6 +179,7 @@ INDEX_HTML = """<!doctype html>
   .badge { padding: 1px 6px; border-radius: 4px; font-size: 11px; }
   .badge.gt { background: #2ecc7133; color: #2ecc71; }
   .badge.pred { background: #3498db33; color: #3498db; }
+  .badge.wrong { background: #e74c3c33; color: #e74c3c; }
 </style>
 </head>
 <body>
@@ -186,6 +189,7 @@ INDEX_HTML = """<!doctype html>
     <input id="search" type="text" placeholder="Search by filename...">
     <select id="split-filter"><option value="">All splits</option></select>
     <select id="class-filter"><option value="">All classes</option></select>
+    <label class="field"><input id="only-wrong" type="checkbox"> Only wrong predictions (GT &ne; Pred count)</label>
   </div>
 </header>
 <div class="grid" id="grid"></div>
@@ -207,22 +211,25 @@ INDEX_HTML = """<!doctype html>
   }
 
   const searchInput = document.getElementById('search');
+  const onlyWrong = document.getElementById('only-wrong');
 
   function render() {
     const q = searchInput.value.toLowerCase();
     const split = splitSelect.value;
     const cls = classSelect.value;
+    const wrongOnly = onlyWrong.checked;
     const grid = document.getElementById('grid');
     grid.innerHTML = '';
     const filtered = EVAL_DATA.filter(r =>
       (!split || r.split === split) &&
       (!q || r.filename.toLowerCase().includes(q)) &&
-      (!cls || r.classes.includes(cls))
+      (!cls || r.classes.includes(cls)) &&
+      (!wrongOnly || r.is_wrong)
     );
     document.getElementById('count').textContent = `(${filtered.length} of ${EVAL_DATA.length})`;
     for (const r of filtered) {
       const card = document.createElement('div');
-      card.className = 'card';
+      card.className = 'card' + (r.is_wrong ? ' wrong' : '');
       card.onclick = () => { window.location.href = `detail.html?split=${encodeURIComponent(r.split)}&name=${encodeURIComponent(r.filename)}`; };
       card.innerHTML = `
         <img src="../dataset/${r.image}" loading="lazy">
@@ -231,6 +238,7 @@ INDEX_HTML = """<!doctype html>
           <div class="badges">
             <span class="badge gt">GT ${r.counts.ground_truth}</span>
             <span class="badge pred">Pred ${r.counts.prediction}</span>
+            ${r.is_wrong ? '<span class="badge wrong">Wrong</span>' : ''}
           </div>
         </div>`;
       grid.appendChild(card);
@@ -240,6 +248,7 @@ INDEX_HTML = """<!doctype html>
   searchInput.addEventListener('input', render);
   splitSelect.addEventListener('change', render);
   classSelect.addEventListener('change', render);
+  onlyWrong.addEventListener('change', render);
   render();
   window.addEventListener('pageshow', render);
 </script>
@@ -294,7 +303,8 @@ DETAIL_HTML = """<!doctype html>
     document.getElementById('title').textContent = 'Sample not found';
   } else {
     document.getElementById('title').textContent = `${record.split} / ${record.filename}` +
-      ` (GT ${record.counts.ground_truth} / Pred ${record.counts.prediction})`;
+      ` (GT ${record.counts.ground_truth} / Pred ${record.counts.prediction})` +
+      (record.is_wrong ? ' ⚠ wrong' : '');
     const img = document.getElementById('image');
     img.src = `../dataset/${record.image}`;
 
