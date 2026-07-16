@@ -38,10 +38,12 @@ class AIVerify:
     def _init_models(self, models_config: list[dict], threshold: float = 0.5) -> list[Any]:
         models = []
         for model_dict in models_config:
+            category_mapping = model_dict.get('category_mapping', DEFECT_CLASSES)
             verifier = ModelVerifier(
                 model_id=model_dict['model_id'],
                 model_version=f"prediction_{model_dict['model_id']}_{model_dict['model_type']}",
-                model=None
+                model=None,
+                category_mapping=category_mapping,
             )
             model_type = model_dict['model_type']
             weight_path = model_dict['weight_path']
@@ -57,24 +59,24 @@ class AIVerify:
             verifier.model = AutoDetectionModel.from_pretrained(
                 model_type="roboflow",
                 model=init_model,
-                category_mapping=DEFECT_CLASSES,
+                category_mapping=category_mapping,
                 confidence_threshold=threshold,
             )
             models.append(verifier)
         logger.info(f"Initialized {len(models)} detection models.")
-        return models   
-    
-    def _convert_sahi_to_annotations(self, prediction) -> List[Annotation]:
+        return models
+
+    def _convert_sahi_to_annotations(self, prediction, category_mapping: dict) -> List[Annotation]:
         pred_coco_format = prediction.to_coco_annotations()
         annotations = []
         for annotation in pred_coco_format:
-            x1, y1, w, h = annotation['bbox'] 
+            x1, y1, w, h = annotation['bbox']
             x2 = x1 + w
             y2 = y1 + h
             annotations.append(Annotation(
                 bbox=[x1, y1, x2, y2],
                 confidence=annotation['score'],
-                defect_type=DEFECT_CLASSES.get(annotation['category_id'])
+                defect_type=category_mapping.get(annotation['category_id'])
             ))
         return annotations
     
@@ -162,7 +164,7 @@ class AIVerify:
             verbose=False,
         )
         model_version = model.model_version
-        annotations = self._convert_sahi_to_annotations(result)
+        annotations = self._convert_sahi_to_annotations(result, model.category_mapping or DEFECT_CLASSES)
         return ModelPrediction(
             model_version=model_version,
             annotations=annotations,

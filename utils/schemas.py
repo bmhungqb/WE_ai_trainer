@@ -56,4 +56,5 @@ class ModelVerifier:
     model_id: str
     model_version: str
     model: AutoDetectionModel
+    category_mapping: dict = None
     

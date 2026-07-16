@@ -45,19 +45,34 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Detection model(s), as id:type:weight_path (repeatable)",
     )
+    parser.add_argument(
+        "--class-names",
+        default=None,
+        help="Comma-separated class names in the model's output category-id order, e.g. "
+             "'stain,weaving,ignore' for a 3-class model. Defaults to the full DEFECT_CLASSES "
+             "mapping (pleat,stain,weaving,hard_pleat,ignore) if omitted -- only correct for "
+             "models trained with that exact 5-class order.",
+    )
     parser.add_argument("--page-size", type=int, default=50, help="Label Studio task pagination page size")
     parser.add_argument("--dry-run", action="store_true", help="Run inference and report, but don't push predictions")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
 
 
-def parse_models(model_specs: list[str]) -> list[dict]:
+def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
+    category_mapping = None
+    if class_names:
+        category_mapping = {i: name.strip() for i, name in enumerate(class_names.split(","))}
+
     models = []
     for spec in model_specs:
         parts = spec.split(":")
         if len(parts) != 3:
             raise ValueError(f"Invalid --model format '{spec}', expected id:type:weight_path")
-        models.append({"model_id": parts[0], "model_type": parts[1], "weight_path": parts[2]})
+        model_dict = {"model_id": parts[0], "model_type": parts[1], "weight_path": parts[2]}
+        if category_mapping is not None:
+            model_dict["category_mapping"] = category_mapping
+        models.append(model_dict)
     return models
 
 
@@ -171,7 +186,7 @@ def main():
         return 1
 
     logger.info("Step 2: initializing model(s)")
-    verify_configs = {"image_size": args.image_size, "models": parse_models(args.model)}
+    verify_configs = {"image_size": args.image_size, "models": parse_models(args.model, args.class_names)}
     ai_verify = AIVerify(verify_configs)
 
     logger.info("Step 3: running inference per task and pushing pre-annotations")
