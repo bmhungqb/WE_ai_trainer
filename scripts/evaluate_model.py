@@ -1,17 +1,16 @@
 """Run a trained RFDETR checkpoint over a COCO-format dataset (the layout
 produced by scripts/build_train_valid_dataset.py: dataset/train, dataset/valid,
-each with _annotations.coco.json) and build an HTML gallery to inspect failure
-cases (false positives / false negatives) against ground truth.
+each with _annotations.coco.json) and build an HTML gallery to inspect
+predictions against ground truth.
 
 Requires a GPU environment (torch, rfdetr, sahi) - not runnable in this repo's
 dev sandbox. Run on the training/inference server.
 
 Writes:
-    reports/eval_predictions.json  - per-image GT / prediction / TP / FP / FN boxes
-    reports/eval_metrics.json      - overall + per-class precision/recall/F1
+    reports/eval_predictions.json  - per-image GT / prediction boxes
     <html-output>/data.js
-    <html-output>/index.html       - gallery, filterable by split/class, "only failures" toggle
-    <html-output>/detail.html      - single image with toggleable GT / TP / FP / FN layers
+    <html-output>/index.html       - gallery, filterable by split/class
+    <html-output>/detail.html      - single image with toggleable GT / Prediction layers
 
 Usage:
     python scripts/evaluate_model.py \
@@ -33,15 +32,11 @@ from utils.constants import DEFECT_CLASSES
 
 LAYER_COLORS = {
     "ground_truth": "#2ecc71",
-    "true_positive": "#3498db",
-    "false_positive": "#e74c3c",
-    "false_negative": "#f1c40f",
+    "prediction": "#3498db",
 }
 LAYER_LABELS = {
     "ground_truth": "Ground Truth",
-    "true_positive": "True Positive",
-    "false_positive": "False Positive (extra)",
-    "false_negative": "False Negative (missed)",
+    "prediction": "Prediction",
 }
 
 
@@ -90,40 +85,6 @@ def predict_image(model, image, slice_size: int) -> list:
     return boxes
 
 
-def iou(box1: list, box2: list) -> float:
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
-    area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
-    union = area1 + area2 - inter
-    return inter / union if union else 0.0
-
-
-def match_boxes(predicted: list, ground_truth: list, iou_threshold: float = 0.5):
-    """Greedy, class-aware matching. Returns (tp_preds, fp_preds, fn_gts)."""
-    matched_gt = set()
-    tp_preds, fp_preds = [], []
-    for pred in sorted(predicted, key=lambda p: -p["confidence"]):
-        best_idx, best_iou = None, 0.0
-        for i, gt in enumerate(ground_truth):
-            if i in matched_gt or gt["class"] != pred["class"]:
-                continue
-            score = iou(pred["bbox"], gt["bbox"])
-            if score > best_iou:
-                best_idx, best_iou = i, score
-        if best_idx is not None and best_iou >= iou_threshold:
-            matched_gt.add(best_idx)
-            tp_preds.append(pred)
-        else:
-            fp_preds.append(pred)
-    fn_gts = [gt for i, gt in enumerate(ground_truth) if i not in matched_gt]
-    return tp_preds, fp_preds, fn_gts
-
-
 def load_split(dataset_dir: Path, split: str):
     coco_path = dataset_dir / split / "_annotations.coco.json"
     with open(coco_path) as f:
@@ -140,14 +101,13 @@ def load_split(dataset_dir: Path, split: str):
     return coco["images"], gt_by_image
 
 
-def evaluate(dataset_dir: str, splits: list, model, slice_size: int, iou_threshold: float):
+def evaluate(dataset_dir: str, splits: list, model, slice_size: int):
     from PIL import Image
 
     logger = get_logger(__name__)
     dataset_path = Path(dataset_dir)
 
     manifest = []
-    class_totals = {}
 
     for split in splits:
         images, gt_by_image = load_split(dataset_path, split)
@@ -165,49 +125,24 @@ def evaluate(dataset_dir: str, splits: list, model, slice_size: int, iou_thresho
                 logger.error(f"[{split}][{i}/{len(images)}] FAIL {rel_path}: {e}")
                 predicted = []
 
-            tp, fp, fn = match_boxes(predicted, ground_truth, iou_threshold)
-
             classes = sorted({b["class"] for b in ground_truth} | {b["class"] for b in predicted})
-            for cls in classes:
-                totals = class_totals.setdefault(cls, {"tp": 0, "fp": 0, "fn": 0})
-                totals["tp"] += sum(1 for b in tp if b["class"] == cls)
-                totals["fp"] += sum(1 for b in fp if b["class"] == cls)
-                totals["fn"] += sum(1 for b in fn if b["class"] == cls)
 
             manifest.append({
                 "split": split,
                 "filename": img["file_name"],
                 "image": rel_path,
                 "classes": classes,
-                "counts": {"tp": len(tp), "fp": len(fp), "fn": len(fn)},
-                "is_failure": bool(fp or fn),
+                "counts": {"ground_truth": len(ground_truth), "prediction": len(predicted)},
                 "annotations": {
                     "ground_truth": ground_truth,
-                    "true_positive": tp,
-                    "false_positive": fp,
-                    "false_negative": fn,
+                    "prediction": predicted,
                 },
             })
 
             if i % 100 == 0:
                 logger.info(f"[{split}] ...{i}/{len(images)}")
 
-    metrics = {"overall": {"tp": 0, "fp": 0, "fn": 0}}
-    for cls, t in class_totals.items():
-        precision = t["tp"] / (t["tp"] + t["fp"]) if (t["tp"] + t["fp"]) else 0.0
-        recall = t["tp"] / (t["tp"] + t["fn"]) if (t["tp"] + t["fn"]) else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
-        metrics[cls] = {"precision": precision, "recall": recall, "f1": f1, **t}
-        metrics["overall"]["tp"] += t["tp"]
-        metrics["overall"]["fp"] += t["fp"]
-        metrics["overall"]["fn"] += t["fn"]
-
-    o = metrics["overall"]
-    o["precision"] = o["tp"] / (o["tp"] + o["fp"]) if (o["tp"] + o["fp"]) else 0.0
-    o["recall"] = o["tp"] / (o["tp"] + o["fn"]) if (o["tp"] + o["fn"]) else 0.0
-    o["f1"] = 2 * o["precision"] * o["recall"] / (o["precision"] + o["recall"]) if (o["precision"] + o["recall"]) else 0.0
-
-    return manifest, metrics
+    return manifest
 
 
 INDEX_HTML = """<!doctype html>
@@ -227,25 +162,22 @@ INDEX_HTML = """<!doctype html>
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding: 20px; }
   .card { background: #1a1a1a; border-radius: 8px; overflow: hidden; border: 1px solid #2a2a2a; cursor: pointer; transition: transform 0.1s; }
   .card:hover { transform: translateY(-2px); border-color: #555; }
-  .card.failure { border-color: #e74c3c; }
   .card img { width: 100%; height: 150px; object-fit: cover; display: block; background: #000; }
   .card .meta { padding: 8px 10px; font-size: 12px; }
   .card .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card .badges { display: flex; gap: 6px; margin-top: 4px; }
   .badge { padding: 1px 6px; border-radius: 4px; font-size: 11px; }
-  .badge.fp { background: #e74c3c33; color: #e74c3c; }
-  .badge.fn { background: #f1c40f33; color: #f1c40f; }
-  .badge.tp { background: #3498db33; color: #3498db; }
+  .badge.gt { background: #2ecc7133; color: #2ecc71; }
+  .badge.pred { background: #3498db33; color: #3498db; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Model Failure Review <span class="count" id="count"></span></h1>
+  <h1>Model Prediction Review <span class="count" id="count"></span></h1>
   <div class="controls">
     <input id="search" type="text" placeholder="Search by filename...">
     <select id="split-filter"><option value="">All splits</option></select>
     <select id="class-filter"><option value="">All classes</option></select>
-    <label class="field"><input id="only-failures" type="checkbox" checked> Only failures (FP/FN)</label>
   </div>
 </header>
 <div class="grid" id="grid"></div>
@@ -267,34 +199,30 @@ INDEX_HTML = """<!doctype html>
   }
 
   const searchInput = document.getElementById('search');
-  const onlyFailures = document.getElementById('only-failures');
 
   function render() {
     const q = searchInput.value.toLowerCase();
     const split = splitSelect.value;
     const cls = classSelect.value;
-    const failOnly = onlyFailures.checked;
     const grid = document.getElementById('grid');
     grid.innerHTML = '';
     const filtered = EVAL_DATA.filter(r =>
       (!split || r.split === split) &&
       (!q || r.filename.toLowerCase().includes(q)) &&
-      (!cls || r.classes.includes(cls)) &&
-      (!failOnly || r.is_failure)
+      (!cls || r.classes.includes(cls))
     );
     document.getElementById('count').textContent = `(${filtered.length} of ${EVAL_DATA.length})`;
     for (const r of filtered) {
       const card = document.createElement('div');
-      card.className = 'card' + (r.is_failure ? ' failure' : '');
+      card.className = 'card';
       card.onclick = () => { window.location.href = `detail.html?split=${encodeURIComponent(r.split)}&name=${encodeURIComponent(r.filename)}`; };
       card.innerHTML = `
         <img src="../dataset/${r.image}" loading="lazy">
         <div class="meta">
           <div class="name">${r.filename}</div>
           <div class="badges">
-            <span class="badge tp">TP ${r.counts.tp}</span>
-            <span class="badge fp">FP ${r.counts.fp}</span>
-            <span class="badge fn">FN ${r.counts.fn}</span>
+            <span class="badge gt">GT ${r.counts.ground_truth}</span>
+            <span class="badge pred">Pred ${r.counts.prediction}</span>
           </div>
         </div>`;
       grid.appendChild(card);
@@ -304,7 +232,6 @@ INDEX_HTML = """<!doctype html>
   searchInput.addEventListener('input', render);
   splitSelect.addEventListener('change', render);
   classSelect.addEventListener('change', render);
-  onlyFailures.addEventListener('change', render);
   render();
 </script>
 </body>
@@ -358,7 +285,7 @@ DETAIL_HTML = """<!doctype html>
     document.getElementById('title').textContent = 'Sample not found';
   } else {
     document.getElementById('title').textContent = `${record.split} / ${record.filename}` +
-      ` (TP ${record.counts.tp} / FP ${record.counts.fp} / FN ${record.counts.fn})`;
+      ` (GT ${record.counts.ground_truth} / Pred ${record.counts.prediction})`;
     const img = document.getElementById('image');
     img.src = `../dataset/${record.image}`;
 
@@ -444,10 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weights", required=True, help="Path to trained RFDETR checkpoint")
     parser.add_argument("--model-type", default="rfdetrMedium", choices=["rfdetrMedium", "rfdetrLarge", "rfdetrXLarge"])
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
-    parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--slice-size", type=int, default=576, help="SAHI slice size (match training image size)")
-    parser.add_argument("--output", default="reports", help="Directory for prediction/metrics JSON")
-    parser.add_argument("--html-output", default="html_eval", help="Directory for the HTML failure gallery")
+    parser.add_argument("--output", default="reports", help="Directory for prediction JSON")
+    parser.add_argument("--html-output", default="html_eval", help="Directory for the HTML gallery")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
 
@@ -460,22 +386,17 @@ def main():
     logger.info(f"Loading {args.model_type} from {args.weights}")
     model = build_model(args.model_type, args.weights, args.confidence_threshold)
 
-    manifest, metrics = evaluate(args.dataset, args.split, model, args.slice_size, args.iou_threshold)
+    manifest = evaluate(args.dataset, args.split, model, args.slice_size)
 
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
     with open(output_path / "eval_predictions.json", "w") as f:
         json.dump(manifest, f, indent=2)
-    with open(output_path / "eval_metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
 
     build_html(manifest, args.html_output)
 
-    n_failures = sum(1 for r in manifest if r["is_failure"])
-    logger.info(f"Evaluated {len(manifest)} images, {n_failures} with failures (FP/FN)")
-    logger.info(f"Metrics: {json.dumps(metrics, indent=2)}")
+    logger.info(f"Evaluated {len(manifest)} images")
     print(f"\nPredictions: {output_path / 'eval_predictions.json'}")
-    print(f"Metrics: {output_path / 'eval_metrics.json'}")
     print(f"Gallery: {args.html_output}/index.html")
     print("Serve it together with dataset/, e.g.: python -m http.server --directory .")
     return 0
