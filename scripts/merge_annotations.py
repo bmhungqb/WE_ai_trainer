@@ -11,6 +11,7 @@ Reads:
         "gt" is the worker-corrected class for that same bbox.
     reports/predictions_rfdetr_v1.json
     reports/predictions_rfdetr_v2.json
+    reports/predictions_new_model.json
 
 Writes:
     results/<folder>/<name>.jpg (copied)
@@ -22,9 +23,14 @@ Writes:
             "production": [{"bbox": [...], "confidence": 0.9, "class": "pleat"}, ...],
             "ground_truth": [...],
             "rfdetr_v1": [...],
-            "rfdetr_v2": [...]
+            "rfdetr_v2": [...],
+            "new_model": [...]
         }
     }
+
+    Any source whose predictions file is missing is simply omitted/empty -
+    this script works whether you ran inference.py (v1/v2 pair),
+    inference_new_model.py (single new checkpoint), or both.
 
 Usage:
     python scripts/merge_annotations.py --dataset dataset --predictions-dir reports --output results
@@ -43,6 +49,7 @@ from utils.logger import setup_logger, get_logger
 from utils.constants import DEFECT_CLASSES
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+PREDICTION_SOURCES = ("rfdetr_v1", "rfdetr_v2", "new_model")
 
 
 def _label_for(raw_label) -> str:
@@ -109,17 +116,17 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
     dataset_path = Path(dataset_dir)
     output_path = Path(output_dir)
 
-    rfdetr_predictions = {}
-    for version in ("rfdetr_v1", "rfdetr_v2"):
-        pred_path = Path(predictions_dir) / f"predictions_{version}.json"
+    source_predictions = {}
+    for source in PREDICTION_SOURCES:
+        pred_path = Path(predictions_dir) / f"predictions_{source}.json"
         if pred_path.exists():
             with open(pred_path, "r") as f:
-                rfdetr_predictions[version] = json.load(f)
+                source_predictions[source] = json.load(f)
         else:
-            logger.warning(f"Missing {pred_path}; {version} annotations will be empty")
-            rfdetr_predictions[version] = {}
+            logger.warning(f"Missing {pred_path}; {source} annotations will be empty")
+            source_predictions[source] = {}
 
-    merged, skipped, missing_rfdetr = 0, 0, 0
+    merged, skipped, missing_source = 0, 0, 0
     for json_path in sorted(dataset_path.rglob("*.json")):
         image_path = next(
             (json_path.with_suffix(ext) for ext in IMAGE_EXTS if json_path.with_suffix(ext).exists()),
@@ -149,10 +156,15 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
         folder = image_path.parent.name
         rel_image = f"{folder}/{image_path.name}"
 
-        rfdetr_v1 = rfdetr_predictions["rfdetr_v1"].get(rel_image)
-        rfdetr_v2 = rfdetr_predictions["rfdetr_v2"].get(rel_image)
-        if rfdetr_v1 is None or rfdetr_v2 is None:
-            missing_rfdetr += 1
+        source_annotations = {}
+        any_missing = False
+        for source in PREDICTION_SOURCES:
+            preds = source_predictions[source].get(rel_image)
+            if preds is None:
+                any_missing = True
+            source_annotations[source] = preds or []
+        if any_missing:
+            missing_source += 1
 
         merged_record = {
             "image": rel_image,
@@ -160,8 +172,7 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
             "annotations": {
                 "production": extract_boxes(sample, width, height, ground_truth=False),
                 "ground_truth": extract_boxes(sample, width, height, ground_truth=True),
-                "rfdetr_v1": rfdetr_v1 or [],
-                "rfdetr_v2": rfdetr_v2 or [],
+                **source_annotations,
             },
         }
 
@@ -175,7 +186,7 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
 
     logger.info(
         f"Merged {merged} samples into {output_path} "
-        f"({skipped} skipped due to broken files, {missing_rfdetr} missing rfdetr predictions)"
+        f"({skipped} skipped due to broken files, {missing_source} missing one or more prediction sources)"
     )
     return merged
 
