@@ -80,6 +80,7 @@ def process_task(task):
             "iscrowd": 0
         })
     return {
+        "task_id": task_id,
         "image_url": image_url,
         "width": orig_w,
         "height": orig_h,

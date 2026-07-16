@@ -138,6 +138,7 @@ def evaluate(dataset_dir: str, splits: list, model, slice_size: int, category_ma
             manifest.append({
                 "split": split,
                 "filename": img["file_name"],
+                "task_id": img.get("task_id"),
                 "image": rel_path,
                 "classes": classes,
                 "counts": {"ground_truth": len(ground_truth), "prediction": len(predicted)},
@@ -175,6 +176,7 @@ INDEX_HTML = """<!doctype html>
   .card img { width: 100%; height: 150px; object-fit: cover; display: block; background: #000; }
   .card .meta { padding: 8px 10px; font-size: 12px; }
   .card .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .taskid { color: #888; font-size: 11px; margin-top: 2px; }
   .card .badges { display: flex; gap: 6px; margin-top: 4px; }
   .badge { padding: 1px 6px; border-radius: 4px; font-size: 11px; }
   .badge.gt { background: #2ecc7133; color: #2ecc71; }
@@ -235,6 +237,7 @@ INDEX_HTML = """<!doctype html>
         <img src="../dataset/${r.image}" loading="lazy">
         <div class="meta">
           <div class="name">${r.filename}</div>
+          ${r.task_id !== null && r.task_id !== undefined ? `<div class="taskid">Task ${r.task_id}</div>` : ''}
           <div class="badges">
             <span class="badge gt">GT ${r.counts.ground_truth}</span>
             <span class="badge pred">Pred ${r.counts.prediction}</span>
@@ -302,7 +305,8 @@ DETAIL_HTML = """<!doctype html>
   if (!record) {
     document.getElementById('title').textContent = 'Sample not found';
   } else {
-    document.getElementById('title').textContent = `${record.split} / ${record.filename}` +
+    const taskLabel = (record.task_id !== null && record.task_id !== undefined) ? ` [Task ${record.task_id}]` : '';
+    document.getElementById('title').textContent = `${record.split} / ${record.filename}${taskLabel}` +
       ` (GT ${record.counts.ground_truth} / Pred ${record.counts.prediction})` +
       (record.is_wrong ? ' ⚠ wrong' : '');
     const img = document.getElementById('image');

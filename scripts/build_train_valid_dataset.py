@@ -100,6 +100,7 @@ def write_split(client, bucket_cache, images, annotations_by_image, categories, 
         old_to_new_image_id[old_id] = new_id
         coco["images"].append({
             "id": new_id,
+            "task_id": img.get("task_id"),
             "file_name": downloaded_names[old_id],
             "width": img["width"],
             "height": img["height"],

@@ -90,6 +90,7 @@ def pull_sample(
             image_id = len(coco_output_format["images"]) + 1
             coco_output_format["images"].append({
                 "id": image_id,
+                "task_id": sample["task_id"],
                 "file_name": sample["image_url"],
                 "width": sample["width"],
                 "height": sample["height"],
