@@ -9,8 +9,9 @@ Supports two dataset layouts:
         dataset/TPWL/*.jpg + *.json
         dataset/TPRL/*.jpg + *.json
 
-For each split/folder found, reports image count, annotation count, and
-per-class distribution. Writes the combined report to reports/dataset_stats.json.
+For each split/folder found, reports image count, annotation count,
+positive/negative image counts, and per-class distribution. Writes the
+combined report to reports/dataset_stats.json.
 
 Usage:
     python scripts/dataset_stats.py --dataset dataset --report reports/dataset_stats.json
@@ -37,12 +38,16 @@ def stats_from_coco(coco_path: Path) -> dict:
     class_counts = Counter(cat_names.get(a["category_id"], a["category_id"]) for a in coco["annotations"])
 
     images_with_annos = {a["image_id"] for a in coco["annotations"]}
+    num_positive = len(images_with_annos)
+    num_negative = len(coco["images"]) - num_positive
 
     return {
         "format": "coco",
         "num_images": len(coco["images"]),
         "num_annotations": len(coco["annotations"]),
-        "images_without_annotations": len(coco["images"]) - len(images_with_annos),
+        "images_without_annotations": num_negative,
+        "num_positive_images": num_positive,
+        "num_negative_images": num_negative,
         "class_counts": dict(class_counts.most_common()),
     }
 
@@ -50,6 +55,8 @@ def stats_from_coco(coco_path: Path) -> dict:
 def stats_from_sidecar_folder(folder: Path) -> dict:
     num_images = 0
     num_annotations = 0
+    num_positive = 0
+    num_negative = 0
     class_counts = Counter()
 
     for image_path in sorted(folder.iterdir()):
@@ -71,6 +78,10 @@ def stats_from_sidecar_folder(folder: Path) -> dict:
         boxes = pos if isinstance(pos, list) else [pos] if pos is not None else []
         n = max(len(labels), len(boxes), 1 if (labels or boxes) else 0)
         num_annotations += n
+        if n > 0:
+            num_positive += 1
+        else:
+            num_negative += 1
         for label in labels:
             class_counts[label] += 1
 
@@ -78,6 +89,8 @@ def stats_from_sidecar_folder(folder: Path) -> dict:
         "format": "sidecar",
         "num_images": num_images,
         "num_annotations": num_annotations,
+        "num_positive_images": num_positive,
+        "num_negative_images": num_negative,
         "class_counts": dict(class_counts.most_common()),
     }
 
@@ -127,6 +140,8 @@ def main():
     for name, s in report.items():
         print(f"\n{name} ({s['format']}):")
         print(f"  images:      {s['num_images']}")
+        print(f"  positive:    {s['num_positive_images']}")
+        print(f"  negative:    {s['num_negative_images']}")
         print(f"  annotations: {s['num_annotations']}")
         print(f"  classes:")
         for cls, count in s["class_counts"].items():
