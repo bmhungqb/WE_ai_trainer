@@ -1,8 +1,12 @@
-"""Download annotated samples from a Label Studio project (skips negative/unannotated tasks).
+"""Download annotated samples from a Label Studio project (skips unreviewed tasks).
+
+By default, negative samples (reviewed tasks with no defect annotations) are excluded.
+Pass --include-negatives to keep them in the output.
 
 Usage:
     python scripts/pull_label_studio_samples.py --project-id 23           # pull ALL annotated samples
     python scripts/pull_label_studio_samples.py --project-id 23 --limit 5  # pull only the first 5 annotated samples
+    python scripts/pull_label_studio_samples.py --project-id 23 --include-negatives  # also keep negative samples
 
 Reads LABEL_STUDIO_URL / LABEL_STUDIO_API_KEY from the environment (.env).
 """
@@ -37,6 +41,7 @@ def pull_sample(
     page_size: int = 50,
     created_after: datetime.date | None = None,
     created_before: datetime.date | None = None,
+    include_negatives: bool = False,
 ):
     ls = Client(url, api_key)
     project = ls.get_project(project_id)
@@ -77,8 +82,10 @@ def pull_sample(
                     continue
 
             sample = process_task(task)
-            if not sample or not sample["annos"]:
-                continue  # skip negative / unannotated samples
+            if not sample:
+                continue  # skip unannotated tasks (no review recorded at all)
+            if not sample["annos"] and not include_negatives:
+                continue  # skip negative samples (reviewed, no defects)
 
             image_id = len(coco_output_format["images"]) + 1
             coco_output_format["images"].append({
@@ -104,8 +111,8 @@ def pull_sample(
         page += 1
 
     logger.info(
-        f"Scanned {scanned} task(s), kept {len(coco_output_format['images'])} annotated sample(s) "
-        f"from project {project_id}"
+        f"Scanned {scanned} task(s), kept {len(coco_output_format['images'])} sample(s) "
+        f"(negatives {'included' if include_negatives else 'excluded'}) from project {project_id}"
     )
 
     for category_id, category_name in DEFECT_CLASSES.items():
@@ -139,6 +146,10 @@ def main():
         "--created-before", type=str, default=None, help="Only pull tasks created on/before this date (YYYY-MM-DD)"
     )
     parser.add_argument(
+        "--include-negatives", action="store_true",
+        help="Keep negative samples (reviewed tasks with no defect annotations) in the output"
+    )
+    parser.add_argument(
         "--output",
         default=f"tmp/annotations_project23_sample_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
     )
@@ -159,6 +170,7 @@ def main():
     path = pull_sample(
         url, api_key, args.project_id, args.limit, args.output,
         created_after=created_after, created_before=created_before,
+        include_negatives=args.include_negatives,
     )
 
     print(f"Done. Output: {path}")
