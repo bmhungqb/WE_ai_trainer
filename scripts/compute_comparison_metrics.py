@@ -10,7 +10,7 @@ Reads:
 Writes:
     reports/comparison_metrics.json
 
-Two kinds of metrics, both IoU-matched (greedy, same convention as
+Three kinds of metrics, all IoU-matched (greedy, same convention as
 scripts/compute_metrics.py / src/ai_verify.py::AIVerify._calculate_iou):
 
 1. Per-class + overall precision/recall/F1 for "production" and "new_model"
@@ -18,17 +18,26 @@ scripts/compute_metrics.py / src/ai_verify.py::AIVerify._calculate_iou):
    it also matches the ground-truth box's class (unlike compute_metrics.py,
    which is location-only).
 
-2. False-alarm suppression: production has no "ignore" concept, so its false
-   positives conflate "wrong class" and "should never have fired" into one
-   number. Ground truth boxes whose worker-corrected label is the Vietnamese
-   no-defect label ("Khong_co_loi", see utils/constants.py MAPPING_CLASSES)
-   are the cases where a worker looked and confirmed nothing was there. For
-   each source, among its predictions matching one of those no-defect GT
-   boxes:
+2. "false_alarm_suppression": production has no "ignore" concept, so its
+   false positives conflate "wrong class" and "should never have fired" into
+   one number. Ground truth boxes whose worker-corrected label is the
+   Vietnamese no-defect label ("Khong_co_loi", see utils/constants.py
+   MAPPING_CLASSES) are the cases where a worker looked and confirmed
+   nothing was there. For each source, among its predictions matching one of
+   those no-defect GT boxes:
      - "new_model" predicting the "ignore" class there = correct suppression
      - anything else predicting a real defect class there = false alarm
    This isolates the exact behavior the new "ignore" class was trained to
    fix, which precision/recall alone would bury inside "wrong class" errors.
+
+3. "ignore_cost": the flip side of (2) - the price paid for having an
+   "ignore" class at all. Among ground-truth boxes that ARE a real defect,
+   how many did each source predict as "ignore" (missed_as_ignore, a defect
+   that would have been caught before but is now silently dropped) vs.
+   correctly catch (caught) vs. miss for other reasons (missed_other -
+   location miss or wrong-but-still-a-defect label, already reflected in the
+   per-class fn counts). Read (2) and (3) together to weigh "how many false
+   alarms does ignore remove" against "how many real defects does it cost".
 
 Usage:
     python scripts/compute_comparison_metrics.py --results results --report reports/comparison_metrics.json
@@ -142,11 +151,48 @@ def false_alarm_counts(predicted: list, ground_truth: list, iou_threshold: float
     }
 
 
+def missed_defect_counts(predicted: list, ground_truth: list, iou_threshold: float) -> dict:
+    """The other side of false_alarm_counts: among REAL-defect GT boxes
+    (any class other than the no-defect label), how many did the source
+    correctly catch vs. miss - and of the misses, how many were specifically
+    because it predicted "ignore" there (a defect newly missed as a direct
+    cost of the ignore class, as opposed to a location/confidence miss or a
+    wrong-but-still-a-defect label)."""
+    defect_gt = [g for g in ground_truth if g.get("class") != NO_DEFECT_LABEL]
+    if not defect_gt:
+        return {"defect_gt_boxes": 0, "caught": 0, "missed_as_ignore": 0, "missed_other": 0}
+
+    pairs, matched_gt = greedy_match(predicted, defect_gt, iou_threshold)
+
+    caught = 0
+    missed_as_ignore = 0
+    for pred, gt in pairs:
+        if gt is None:
+            continue
+        if pred.get("class") == gt.get("class"):
+            caught += 1
+        elif pred.get("class") == IGNORE_LABEL:
+            missed_as_ignore += 1
+        # else: matched but wrong (non-ignore) class - not counted as
+        # "caught", already reflected in classification_counts' fp/fn.
+
+    unmatched = len(defect_gt) - len(matched_gt)
+    return {
+        "defect_gt_boxes": len(defect_gt),
+        "caught": caught,
+        "missed_as_ignore": missed_as_ignore,
+        "missed_other": unmatched,
+    }
+
+
 def compute_comparison_metrics(results_dir: str, iou_threshold: float = 0.5) -> dict:
     logger = get_logger(__name__)
 
     per_class_totals = {source: defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0}) for source in SOURCES}
     false_alarm_totals = {source: {"no_defect_gt_boxes": 0, "false_alarms": 0, "suppressed": 0} for source in SOURCES}
+    missed_defect_totals = {
+        source: {"defect_gt_boxes": 0, "caught": 0, "missed_as_ignore": 0, "missed_other": 0} for source in SOURCES
+    }
 
     samples = 0
     for json_path in sorted(Path(results_dir).rglob("*.json")):
@@ -170,6 +216,12 @@ def compute_comparison_metrics(results_dir: str, iou_threshold: float = 0.5) -> 
             false_alarm_totals[source]["false_alarms"] += fa["false_alarms"]
             false_alarm_totals[source]["suppressed"] += fa["suppressed"]
 
+            md = missed_defect_counts(predicted, ground_truth, iou_threshold)
+            missed_defect_totals[source]["defect_gt_boxes"] += md["defect_gt_boxes"]
+            missed_defect_totals[source]["caught"] += md["caught"]
+            missed_defect_totals[source]["missed_as_ignore"] += md["missed_as_ignore"]
+            missed_defect_totals[source]["missed_other"] += md["missed_other"]
+
         samples += 1
 
     report = {"samples": samples, "iou_threshold": iou_threshold, "sources": {}}
@@ -185,6 +237,9 @@ def compute_comparison_metrics(results_dir: str, iou_threshold: float = 0.5) -> 
         false_alarm_rate = fa["false_alarms"] / fa["no_defect_gt_boxes"] if fa["no_defect_gt_boxes"] else 0.0
         suppression_rate = fa["suppressed"] / fa["no_defect_gt_boxes"] if fa["no_defect_gt_boxes"] else 0.0
 
+        md = missed_defect_totals[source]
+        missed_as_ignore_rate = md["missed_as_ignore"] / md["defect_gt_boxes"] if md["defect_gt_boxes"] else 0.0
+
         report["sources"][source] = {
             "overall": prf1(overall_tp, overall_fp, overall_fn),
             "per_class": per_class,
@@ -193,15 +248,22 @@ def compute_comparison_metrics(results_dir: str, iou_threshold: float = 0.5) -> 
                 "false_alarm_rate": false_alarm_rate,
                 "suppression_rate": suppression_rate,
             },
+            "ignore_cost": {
+                **md,
+                "missed_as_ignore_rate": missed_as_ignore_rate,
+            },
         }
 
     logger.info(f"Computed comparison metrics over {samples} samples")
     for source in SOURCES:
         overall = report["sources"][source]["overall"]
         fa = report["sources"][source]["false_alarm_suppression"]
+        md = report["sources"][source]["ignore_cost"]
         logger.info(
             f"  {source}: P={overall['precision']:.3f} R={overall['recall']:.3f} F1={overall['f1']:.3f} "
-            f"| false_alarm_rate={fa['false_alarm_rate']:.3f} (on {fa['no_defect_gt_boxes']} no-defect GT boxes)"
+            f"| false_alarm_rate={fa['false_alarm_rate']:.3f} (on {fa['no_defect_gt_boxes']} no-defect GT boxes) "
+            f"| missed_as_ignore={md['missed_as_ignore']}/{md['defect_gt_boxes']} real defects "
+            f"({md['missed_as_ignore_rate']:.3f})"
         )
 
     return report
