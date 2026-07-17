@@ -159,10 +159,13 @@ def merge_dataset(dataset_dir: str, predictions_dir: str, output_dir: str):
         source_annotations = {}
         any_missing = False
         for source in PREDICTION_SOURCES:
-            preds = source_predictions[source].get(rel_image)
-            if preds is None:
+            # Only flag as "missing" if that source's predictions file was
+            # actually loaded (non-empty) but doesn't cover this image -
+            # a source with no predictions file at all (e.g. rfdetr_v1/v2
+            # when only the new model was run) is expected, not an error.
+            if source_predictions[source] and rel_image not in source_predictions[source]:
                 any_missing = True
-            source_annotations[source] = preds or []
+            source_annotations[source] = source_predictions[source].get(rel_image) or []
         if any_missing:
             missing_source += 1
 
