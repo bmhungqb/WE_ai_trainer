@@ -62,6 +62,8 @@ GALLERY_HTML = """<!doctype html>
   .card .meta { padding: 8px 10px; font-size: 12px; }
   .card .cls { font-weight: 600; color: __ACCENT__; }
   .card .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #999; }
+  .card .task { color: #6cf; font-size: 11px; margin-top: 2px; }
+  .modal-meta a { color: #6cf; }
   .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 10; }
   .modal.open { display: flex; align-items: center; justify-content: center; }
   .modal-close { position: absolute; top: 16px; right: 24px; font-size: 28px; color: #fff; cursor: pointer; }
@@ -110,7 +112,12 @@ GALLERY_HTML = """<!doctype html>
   function openModal(item) {
     modal.classList.add('open');
     modalImg.src = item.full_image_rel;
-    modalMeta.textContent = `${item.source_image} | GT: ${item.gt_class} | ignore conf ${(item.ignore_confidence*100).toFixed(1)}% | IoU ${(item.iou*100).toFixed(1)}% | ${item.captured_at || ''}`;
+    const taskPart = item.task_id
+      ? (item.label_studio_url
+          ? ` | task <a href="${item.label_studio_url}" target="_blank" rel="noopener">${item.task_id}</a>`
+          : ` | task ${item.task_id}`)
+      : '';
+    modalMeta.innerHTML = `${item.source_image} | GT: ${item.gt_class} | ignore conf ${(item.ignore_confidence*100).toFixed(1)}% | IoU ${(item.iou*100).toFixed(1)}% | ${item.captured_at || ''}${taskPart}`;
     function draw() {
       modalOverlay.innerHTML = '';
       const scaleX = modalImg.clientWidth / modalImg.naturalWidth;
@@ -146,6 +153,7 @@ GALLERY_HTML = """<!doctype html>
         <div class="meta">
           <div class="cls">${item.gt_class}</div>
           <div class="name">${item.source_image}</div>
+          ${item.task_id ? `<div class="task">Task ${item.task_id}</div>` : ''}
         </div>`;
       grid.appendChild(card);
     }
@@ -279,12 +287,7 @@ def extract(results_dir: str, model: str, month: str, output_dir: str,
     with open(output_path / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
-    title = f"Real Defects Missed as &quot;ignore&quot; &mdash; {model} / {month or 'all'}"
-    gallery_html = GALLERY_HTML.replace("__TITLE__", title)
-    gallery_html = gallery_html.replace("__ACCENT__", "#f39c12")
-    gallery_html = gallery_html.replace("__MANIFEST__", json.dumps(manifest, ensure_ascii=False))
-    with open(output_path / "gallery.html", "w") as f:
-        f.write(gallery_html)
+    build_gallery(manifest, output_path / "gallery.html", model, month)
 
     logger.info(
         f"Scanned {n_records_matched_month} records in month={month!r}, "
@@ -292,6 +295,18 @@ def extract(results_dir: str, model: str, month: str, output_dir: str,
         f"{len(manifest)} missed-as-ignore cases extracted to {crops_path}"
     )
     return manifest
+
+
+def build_gallery(manifest: list, gallery_path: Path, model: str, month: str) -> None:
+    """(Re)generate gallery.html from a manifest - reads task_id/label_studio_url
+    if present (added by scripts/annotate_manifest_with_task_id.py), so this can
+    be called again after that join without re-running extraction."""
+    title = f"Real Defects Missed as &quot;ignore&quot; &mdash; {model} / {month or 'all'}"
+    gallery_html = GALLERY_HTML.replace("__TITLE__", title)
+    gallery_html = gallery_html.replace("__ACCENT__", "#f39c12")
+    gallery_html = gallery_html.replace("__MANIFEST__", json.dumps(manifest, ensure_ascii=False))
+    with open(gallery_path, "w") as f:
+        f.write(gallery_html)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -302,6 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default=None, help="Output directory for crops + manifest (default: reports/missed_as_ignore_<model>)")
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--padding", type=int, default=20, help="Pixels of context padding around each crop")
+    parser.add_argument(
+        "--rebuild-gallery-from", default=None,
+        help="Skip extraction; just rebuild gallery.html from this manifest JSON (e.g. "
+             "manifest_with_task_id.json from scripts/annotate_manifest_with_task_id.py) "
+             "into --output. Use this to pick up task_id/label_studio_url in the viewer "
+             "without re-extracting crops.",
+    )
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
 
@@ -310,9 +332,16 @@ def main():
     args = build_parser().parse_args()
     setup_logger(log_dir=args.log_dir)
 
-    output = args.output or f"reports/missed_as_ignore_{args.model}"
+    output = Path(args.output or f"reports/missed_as_ignore_{args.model}")
 
-    manifest = extract(args.results, args.model, args.month, output, args.iou_threshold, args.padding)
+    if args.rebuild_gallery_from:
+        with open(args.rebuild_gallery_from, "r") as f:
+            manifest = json.load(f)
+        build_gallery(manifest, output / "gallery.html", args.model, args.month)
+        print(f"Rebuilt {output}/gallery.html from {args.rebuild_gallery_from} ({len(manifest)} entries)")
+        return 0
+
+    manifest = extract(args.results, args.model, args.month, str(output), args.iou_threshold, args.padding)
 
     print(f"Extracted {len(manifest)} missed-as-ignore crops to {output}/crops")
     print(f"Manifest: {output}/manifest.json")
