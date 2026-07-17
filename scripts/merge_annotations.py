@@ -46,20 +46,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.logger import setup_logger, get_logger
-from utils.constants import DEFECT_CLASSES
+from utils.constants import DEFECT_CLASSES, CANONICAL_LABELS
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 PREDICTION_SOURCES = ("rfdetr_v1", "rfdetr_v2", "new_model")
 
 
 def _label_for(raw_label) -> str:
+    """Normalize a raw "gt" or "pos" class label (int index, or any of the
+    old VN-space / VN-underscore / new-English string vocabularies - see
+    utils/constants.py::CANONICAL_LABELS) onto one canonical class name."""
     if raw_label is None:
         return "unknown"
     if isinstance(raw_label, str) and raw_label.lstrip("-").isdigit():
         raw_label = int(raw_label)
     if isinstance(raw_label, int):
-        return DEFECT_CLASSES.get(raw_label, str(raw_label))
-    return str(raw_label)
+        raw_label = DEFECT_CLASSES.get(raw_label, str(raw_label))
+    return CANONICAL_LABELS.get(raw_label, str(raw_label))
 
 
 def _parse_pos_entries(pos) -> list:
