@@ -37,6 +37,13 @@ def stats_from_coco(coco_path: Path) -> dict:
     cat_names = {c["id"]: c["name"] for c in coco.get("categories", [])}
     class_counts = Counter(cat_names.get(a["category_id"], a["category_id"]) for a in coco["annotations"])
 
+    images_by_class = {}
+    for a in coco["annotations"]:
+        cls = cat_names.get(a["category_id"], a["category_id"])
+        images_by_class.setdefault(cls, set()).add(a["image_id"])
+    images_per_class = {cls: len(img_ids) for cls, img_ids in images_by_class.items()}
+    images_per_class = dict(sorted(images_per_class.items(), key=lambda kv: -kv[1]))
+
     images_with_annos = {a["image_id"] for a in coco["annotations"]}
     num_positive = len(images_with_annos)
     num_negative = len(coco["images"]) - num_positive
@@ -49,6 +56,7 @@ def stats_from_coco(coco_path: Path) -> dict:
         "num_positive_images": num_positive,
         "num_negative_images": num_negative,
         "class_counts": dict(class_counts.most_common()),
+        "images_per_class": images_per_class,
     }
 
 
@@ -58,6 +66,7 @@ def stats_from_sidecar_folder(folder: Path) -> dict:
     num_positive = 0
     num_negative = 0
     class_counts = Counter()
+    images_by_class = {}
 
     for image_path in sorted(folder.iterdir()):
         if image_path.suffix.lower() not in IMAGE_EXTS:
@@ -82,8 +91,13 @@ def stats_from_sidecar_folder(folder: Path) -> dict:
             num_positive += 1
         else:
             num_negative += 1
+        for label in set(labels):
+            images_by_class.setdefault(label, set()).add(image_path.name)
         for label in labels:
             class_counts[label] += 1
+
+    images_per_class = {cls: len(img_names) for cls, img_names in images_by_class.items()}
+    images_per_class = dict(sorted(images_per_class.items(), key=lambda kv: -kv[1]))
 
     return {
         "format": "sidecar",
@@ -92,6 +106,7 @@ def stats_from_sidecar_folder(folder: Path) -> dict:
         "num_positive_images": num_positive,
         "num_negative_images": num_negative,
         "class_counts": dict(class_counts.most_common()),
+        "images_per_class": images_per_class,
     }
 
 
@@ -143,9 +158,11 @@ def main():
         print(f"  positive:    {s['num_positive_images']}")
         print(f"  negative:    {s['num_negative_images']}")
         print(f"  annotations: {s['num_annotations']}")
-        print(f"  classes:")
+        print(f"  classes (annotation count / image count):")
+        images_per_class = s.get("images_per_class", {})
         for cls, count in s["class_counts"].items():
-            print(f"    {cls}: {count}")
+            img_count = images_per_class.get(cls, 0)
+            print(f"    {cls}: {count} boxes / {img_count} images")
 
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)
