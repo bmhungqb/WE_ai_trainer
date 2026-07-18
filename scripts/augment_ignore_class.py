@@ -18,11 +18,23 @@ Host image selection (targets --target-count new images total):
       pool size; each draw still produces a distinct output file.
 
 Placement: for each host image, 1+ ignore crops (randomly chosen from the
-pool of existing ignore-labeled boxes) are pasted at random positions that
-do NOT overlap (IoU-free, checked by simple rectangle intersection) any of
-the host's existing annotation boxes, so real defect labels are never
-occluded/contradicted. Crops are blended in with a feathered (Gaussian
-alpha) edge instead of a hard paste, to avoid an obvious seam.
+crop pool) are pasted at random positions that do NOT overlap (IoU-free,
+checked by simple rectangle intersection) any of the host's existing
+annotation boxes, so real defect labels are never occluded/contradicted.
+
+Crop pool source - two modes:
+    1. --sam3-crops-dir (recommended if you have it): a folder of
+       pre-segmented transparent PNGs (RGBA, background already removed via
+       SAM3 - see the crop -> pad 5px -> SAM3 segment pipeline). Every
+       *.png in that folder is loaded and its own alpha channel is used
+       directly as the paste mask, so the pasted shape follows the actual
+       segmented object instead of a rectangle - no traceable mapping back
+       to a specific source annotation is needed or used, it's just a flat
+       cutout pool.
+    2. Default (no --sam3-crops-dir): crops the existing "ignore"-labeled
+       rectangular boxes directly from the COCO dataset at runtime, blended
+       with a synthetic feathered (Gaussian) rectangular edge instead of a
+       real segmentation mask.
 
 Reads:
     <dataset>/train/_annotations.coco.json + images
@@ -74,13 +86,12 @@ def find_free_position(host_w: int, host_h: int, crop_w: int, crop_h: int,
     return None
 
 
-def feathered_paste(host_img, crop_img, x: int, y: int, feather: int = 8):
-    """Alpha-blend crop_img onto host_img at (x, y) with a soft (Gaussian-like
-    linear ramp) edge instead of a hard rectangular seam."""
+def feathered_mask(w: int, h: int, feather: int):
+    """Synthetic soft (Gaussian-like linear ramp) rectangular edge mask, for
+    crops with no real alpha channel of their own."""
     from PIL import Image, ImageFilter
     import numpy as np
 
-    w, h = crop_img.size
     mask = Image.new("L", (w, h), 255)
     if feather > 0 and w > feather * 2 and h > feather * 2:
         mask_arr = np.full((h, w), 255, dtype=np.uint8)
@@ -90,8 +101,21 @@ def feathered_paste(host_img, crop_img, x: int, y: int, feather: int = 8):
         mask_arr[:, :feather] = np.minimum(mask_arr[:, :feather], ramp[None, :])
         mask_arr[:, -feather:] = np.minimum(mask_arr[:, -feather:], ramp[::-1][None, :])
         mask = Image.fromarray(mask_arr, mode="L").filter(ImageFilter.GaussianBlur(radius=2))
+    return mask
 
-    host_img.paste(crop_img, (x, y), mask)
+
+def paste_crop(host_img, crop_img, x: int, y: int, feather: int = 8):
+    """Paste crop_img onto host_img at (x, y). If crop_img already has an
+    alpha channel (RGBA - e.g. a SAM3-segmented cutout), that real mask is
+    used directly so the pasted shape follows the segmented object. Otherwise
+    falls back to a synthetic feathered rectangular edge."""
+    w, h = crop_img.size
+    if crop_img.mode == "RGBA":
+        mask = crop_img.getchannel("A")
+        host_img.paste(crop_img.convert("RGB"), (x, y), mask)
+    else:
+        mask = feathered_mask(w, h, feather)
+        host_img.paste(crop_img, (x, y), mask)
 
 
 def load_coco(coco_path: Path) -> dict:
@@ -131,6 +155,27 @@ def build_ignore_crop_pool(coco: dict, images_dir: Path, ignore_cat_id: int) -> 
     return crops
 
 
+def load_sam3_crop_pool(crops_dir: Path) -> list:
+    """List of RGBA PIL.Image cutouts loaded from a folder of pre-segmented
+    transparent PNGs (SAM3 output) - a flat pool, no per-annotation
+    provenance needed."""
+    from PIL import Image
+
+    logger = get_logger(__name__)
+    crops = []
+    for png_path in sorted(crops_dir.glob("*.png")):
+        try:
+            crop = Image.open(png_path).convert("RGBA")
+            crop.load()
+        except Exception as e:
+            logger.warning(f"Failed to load {png_path}: {e}")
+            continue
+        crops.append(crop)
+
+    logger.info(f"Loaded SAM3 crop pool from {crops_dir}: {len(crops)} crops")
+    return crops
+
+
 def select_host_pool(coco: dict, class_names: tuple, cat_name_by_id: dict) -> list:
     """image_ids containing at least one box of any class in class_names."""
     target_ids = {cid for cid, name in cat_name_by_id.items() if name in class_names}
@@ -140,7 +185,7 @@ def select_host_pool(coco: dict, class_names: tuple, cat_name_by_id: dict) -> li
 
 def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
             weaving_stain_share: float, min_crops_per_image: int, max_crops_per_image: int,
-            feather: int, seed: int) -> None:
+            feather: int, seed: int, sam3_crops_dir: str = None) -> None:
     from PIL import Image
 
     logger = get_logger(__name__)
@@ -157,9 +202,12 @@ def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
     if ignore_cat_id is None:
         raise SystemExit(f"No '{IGNORE_CLASS_NAME}' category in {coco_path}")
 
-    ignore_crops = build_ignore_crop_pool(coco, split_dir, ignore_cat_id)
+    if sam3_crops_dir:
+        ignore_crops = load_sam3_crop_pool(Path(sam3_crops_dir))
+    else:
+        ignore_crops = build_ignore_crop_pool(coco, split_dir, ignore_cat_id)
     if not ignore_crops:
-        raise SystemExit("No ignore-labeled boxes found to build a crop pool from")
+        raise SystemExit("No ignore crops found to build a crop pool from")
 
     annos_by_image = {}
     for a in coco["annotations"]:
@@ -222,7 +270,7 @@ def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
             if pos is None:
                 continue
             x, y = pos
-            feathered_paste(host_img, crop, x, y, feather=feather)
+            paste_crop(host_img, crop, x, y, feather=feather)
             placed_boxes.append([x, y, cw, ch])
 
         if not placed_boxes:
@@ -281,7 +329,13 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Share of the post-negatives budget drawn from weaving/stain host images")
     parser.add_argument("--min-crops-per-image", type=int, default=1, help="Min ignore crops pasted per host image")
     parser.add_argument("--max-crops-per-image", type=int, default=2, help="Max ignore crops pasted per host image")
-    parser.add_argument("--feather", type=int, default=8, help="Feather blend width in pixels (0 = hard paste)")
+    parser.add_argument("--feather", type=int, default=8,
+                         help="Feather blend width in pixels for the fallback rectangular mask "
+                              "(0 = hard paste). Ignored for crops loaded via --sam3-crops-dir, "
+                              "which use their own real alpha channel instead.")
+    parser.add_argument("--sam3-crops-dir", default=None,
+                         help="Folder of pre-segmented transparent PNGs (SAM3 output) to use as the "
+                              "crop pool instead of cropping rectangular ignore boxes at runtime.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
@@ -293,6 +347,7 @@ def main():
     augment(
         args.dataset, args.target_count, args.hard_pleat_pleat_share, args.weaving_stain_share,
         args.min_crops_per_image, args.max_crops_per_image, args.feather, args.seed,
+        sam3_crops_dir=args.sam3_crops_dir,
     )
     return 0
 
