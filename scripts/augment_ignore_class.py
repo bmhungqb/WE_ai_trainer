@@ -17,10 +17,16 @@ Host image selection (targets --target-count new images total):
     - Host images can be drawn more than once if the target exceeds the
       pool size; each draw still produces a distinct output file.
 
-Placement: for each host image, 1+ ignore crops (randomly chosen from the
-crop pool) are pasted at random positions that do NOT overlap (IoU-free,
-checked by simple rectangle intersection) any of the host's existing
-annotation boxes, so real defect labels are never occluded/contradicted.
+Placement: for each host image, 1+ ignore crops are pasted at random
+positions that do NOT overlap (IoU-free, checked by simple rectangle
+intersection) any of the host's existing annotation boxes, so real defect
+labels are never occluded/contradicted. Crops are also filtered by color:
+each crop's mean color (Lab space, computed only over its opaque/masked
+pixels) is compared against the mean color of the host's local background
+at the candidate position, and the pair is only accepted if the CIE76 Lab
+distance is within --max-color-distance. Several (crop, position)
+candidates are tried per placement; if none are close enough in color that
+placement is skipped rather than forcing an obviously mismatched paste.
 
 Crop pool source - two modes:
     1. --sam3-crops-dir (recommended if you have it): a folder of
@@ -84,6 +90,40 @@ def find_free_position(host_w: int, host_h: int, crop_w: int, crop_h: int,
         if not any(boxes_overlap(candidate, b) for b in existing_boxes):
             return x, y
     return None
+
+
+def crop_mean_lab(crop_img) -> tuple:
+    """Mean Lab color of crop_img's opaque pixels (alpha > 0 if RGBA,
+    otherwise all pixels)."""
+    import numpy as np
+    from skimage.color import rgb2lab
+
+    arr = np.asarray(crop_img.convert("RGBA"))
+    rgb = arr[..., :3].astype(np.float64) / 255.0
+    alpha = arr[..., 3]
+    mask = alpha > 0
+    if not mask.any():
+        mask = np.ones_like(alpha, dtype=bool)
+
+    lab = rgb2lab(rgb)
+    return tuple(lab[mask].mean(axis=0))
+
+
+def region_mean_lab(host_img, x: int, y: int, w: int, h: int) -> tuple:
+    """Mean Lab color of host_img's RGB region [x, y, x+w, y+h) - the local
+    background a crop would be pasted onto."""
+    import numpy as np
+    from skimage.color import rgb2lab
+
+    region = host_img.crop((x, y, x + w, y + h)).convert("RGB")
+    rgb = np.asarray(region).astype(np.float64) / 255.0
+    lab = rgb2lab(rgb)
+    return tuple(lab.reshape(-1, 3).mean(axis=0))
+
+
+def lab_distance(a: tuple, b: tuple) -> float:
+    """CIE76 Lab distance (plain Euclidean in Lab space)."""
+    return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
 
 
 def feathered_mask(w: int, h: int, feather: int):
@@ -185,7 +225,8 @@ def select_host_pool(coco: dict, class_names: tuple, cat_name_by_id: dict) -> li
 
 def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
             weaving_stain_share: float, min_crops_per_image: int, max_crops_per_image: int,
-            feather: int, seed: int, sam3_crops_dir: str = None) -> None:
+            feather: int, seed: int, sam3_crops_dir: str = None,
+            max_color_distance: float = 15.0, color_match_attempts: int = 8) -> None:
     from PIL import Image
 
     logger = get_logger(__name__)
@@ -208,6 +249,9 @@ def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
         ignore_crops = build_ignore_crop_pool(coco, split_dir, ignore_cat_id)
     if not ignore_crops:
         raise SystemExit("No ignore crops found to build a crop pool from")
+
+    logger.info("Precomputing crop mean colors for color matching...")
+    crop_colors = [crop_mean_lab(c) for c in ignore_crops]
 
     annos_by_image = {}
     for a in coco["annotations"]:
@@ -242,7 +286,7 @@ def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
 
     new_images = []
     new_annotations = []
-    written, skipped_no_space = 0, 0
+    written, skipped_no_space, skipped_no_color_match = 0, 0, 0
 
     for i, host_id in enumerate(host_plan, 1):
         host_meta = images_by_id[host_id]
@@ -260,21 +304,37 @@ def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
         n_crops = rng.randint(min_crops_per_image, max_crops_per_image)
 
         placed_boxes = []
+        any_color_mismatch = False
         for _ in range(n_crops):
-            crop = rng.choice(ignore_crops)
-            cw, ch = crop.size
-            pos = find_free_position(
-                host_img.width, host_img.height, cw, ch,
-                existing_boxes + placed_boxes, rng=rng,
-            )
-            if pos is None:
+            placed = False
+            for _attempt in range(color_match_attempts):
+                idx = rng.randrange(len(ignore_crops))
+                crop = ignore_crops[idx]
+                cw, ch = crop.size
+                pos = find_free_position(
+                    host_img.width, host_img.height, cw, ch,
+                    existing_boxes + placed_boxes, rng=rng,
+                )
+                if pos is None:
+                    continue
+                x, y = pos
+                host_color = region_mean_lab(host_img, x, y, cw, ch)
+                distance = lab_distance(crop_colors[idx], host_color)
+                if distance > max_color_distance:
+                    any_color_mismatch = True
+                    continue
+                paste_crop(host_img, crop, x, y, feather=feather)
+                placed_boxes.append([x, y, cw, ch])
+                placed = True
+                break
+            if not placed:
                 continue
-            x, y = pos
-            paste_crop(host_img, crop, x, y, feather=feather)
-            placed_boxes.append([x, y, cw, ch])
 
         if not placed_boxes:
-            skipped_no_space += 1
+            if any_color_mismatch:
+                skipped_no_color_match += 1
+            else:
+                skipped_no_space += 1
             continue
 
         out_name = f"aug_ignore_{i:05d}.jpg"
@@ -313,7 +373,8 @@ def augment(dataset_dir: str, target_count: int, hard_pleat_pleat_share: float,
 
     logger.info(
         f"Done. Wrote {written} new augmented image(s) "
-        f"({skipped_no_space} host(s) skipped - no free space for any crop), "
+        f"({skipped_no_space} host(s) skipped - no free space for any crop, "
+        f"{skipped_no_color_match} skipped - no crop within max_color_distance), "
         f"{len(new_annotations)} new 'ignore' annotations. "
         f"Original file backed up as {coco_path.name}.bak"
     )
@@ -336,6 +397,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sam3-crops-dir", default=None,
                          help="Folder of pre-segmented transparent PNGs (SAM3 output) to use as the "
                               "crop pool instead of cropping rectangular ignore boxes at runtime.")
+    parser.add_argument("--max-color-distance", type=float, default=15.0,
+                         help="Max CIE76 Lab distance between a crop's mean color and the host's local "
+                              "background color for the pair to be accepted (lower = stricter match). "
+                              "~2.3 is a 'just noticeable difference'; 15 allows a visible but plausible "
+                              "fabric-tone variation.")
+    parser.add_argument("--color-match-attempts", type=int, default=8,
+                         help="Random (crop, position) candidates tried per placement before giving up "
+                              "on that placement for lack of a close-enough color match")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
@@ -348,6 +417,8 @@ def main():
         args.dataset, args.target_count, args.hard_pleat_pleat_share, args.weaving_stain_share,
         args.min_crops_per_image, args.max_crops_per_image, args.feather, args.seed,
         sam3_crops_dir=args.sam3_crops_dir,
+        max_color_distance=args.max_color_distance,
+        color_match_attempts=args.color_match_attempts,
     )
     return 0
 
