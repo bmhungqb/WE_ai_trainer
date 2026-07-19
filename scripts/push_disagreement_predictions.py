@@ -56,6 +56,21 @@ def _canonical(label: str) -> str:
     return CANONICAL_LABELS.get(label, label)
 
 
+def to_xyxy(human_annos: list) -> list:
+    """utils/label_studio_utils.py::process_task returns each anno's "bbox"
+    as [x1, y1, width, height] (pixel origin + pixel size), NOT [x1, y1, x2,
+    y2] - convert here so iou()/greedy_match() (which expect [x1,y1,x2,y2],
+    same as the model's Annotation.bbox) compare like with like. Without
+    this, width/height get treated as x2/y2 and every human box's "end"
+    corner lands far short of where it should, producing IoU ~0 against
+    even a pixel-perfect matching prediction."""
+    converted = []
+    for h in human_annos:
+        x1, y1, w, h_ = h["bbox"]
+        converted.append({**h, "bbox": [x1, y1, x1 + w, y1 + h_]})
+    return converted
+
+
 def iou(box1: list, box2: list) -> float:
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
@@ -242,7 +257,7 @@ def main():
             logger.info(f"[{i}/{len(tasks)}] task {task_id}: no human annotation, skipping")
             skipped += 1
             continue
-        human_annos = sample["annos"]
+        human_annos = to_xyxy(sample["annos"])
 
         raw_image = task.get("data", {}).get("image", "")
         gcs_image_url = resolve_image_url(raw_image)
