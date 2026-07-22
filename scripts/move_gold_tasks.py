@@ -15,6 +15,12 @@ human annotation's boxes,
 This is the exact inverse of push_disagreement_predictions.py::has_disagreement
 - a task is "gold" iff it does NOT disagree.
 
+On top of the exact-match check, a task is only eligible for gold if:
+  - its human annotation contains at least one stain, weaving, and/or
+    ignore box (tasks made up solely of other classes, e.g. only
+    pleat/hard_pleat, are excluded), AND
+  - every weaving-class human box is a tall, thin streak: height > 3x width.
+
 Moving a task = importing it (with its existing annotation as the task's
 data + a completed annotation) into the target project via the Label Studio
 import API, then deleting it from the source project. The move only happens
@@ -122,6 +128,31 @@ def is_exact_match(predicted: list, human: list, iou_threshold: float) -> bool:
             return False  # matched but different class
     if len(matched) < len(human):
         return False  # a human box was never matched
+    return True
+
+
+GOLD_REQUIRED_CLASSES = {"stain", "weaving", "ignore"}
+WEAVING_LABEL = "weaving"
+WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO = 3.0
+
+
+def has_required_class(human: list) -> bool:
+    """Only consider a task gold if its human annotation contains at least
+    one box of stain, weaving, and/or ignore (any combination) - tasks made
+    up solely of other classes (e.g. only pleat/hard_pleat) are excluded."""
+    return any(_canonical(h["label"]) in GOLD_REQUIRED_CLASSES for h in human)
+
+
+def weaving_boxes_pass_shape(human: list) -> bool:
+    """Every weaving-class human box must be a tall, thin streak: height
+    > 3x width. If any weaving box fails this, the task isn't gold."""
+    for h in human:
+        if _canonical(h["label"]) != WEAVING_LABEL:
+            continue
+        x1, y1, x2, y2 = h["bbox"]
+        width, height = x2 - x1, y2 - y1
+        if width <= 0 or height <= WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO * width:
+            return False
     return True
 
 
@@ -296,6 +327,15 @@ def main():
         if not gcs_image_url.startswith("gs://"):
             logger.warning(f"[{i}/{len(tasks)}] task {task_id}: not a GCS image URL ({gcs_image_url}), skipping")
             skipped += 1
+            continue
+
+        if not has_required_class(human_annos):
+            logger.info(f"[{i}/{len(tasks)}] task {task_id}: no stain/weaving/ignore box, skipping")
+            kept += 1
+            continue
+        if not weaving_boxes_pass_shape(human_annos):
+            logger.info(f"[{i}/{len(tasks)}] task {task_id}: weaving box fails height>3x width shape check, skipping")
+            kept += 1
             continue
 
         try:
