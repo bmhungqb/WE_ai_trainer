@@ -144,6 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Detection model(s) to compare against human annotations, as id:type:weight_path (repeatable)",
     )
+    parser.add_argument(
+        "--model-class-names",
+        default=None,
+        help="Comma-separated class names in the model's output category-id order, e.g. "
+             "'stain,weaving' for a 2-class checkpoint. Applies to all --model entries. "
+             "Defaults to the full DEFECT_CLASSES mapping if omitted - required whenever the "
+             "model wasn't trained on the full 5-class vocabulary, otherwise predicted "
+             "category ids get mapped to the wrong class names.",
+    )
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument(
@@ -164,13 +173,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_models(model_specs: list[str]) -> list[dict]:
+def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
+    category_mapping = (
+        {i: name.strip() for i, name in enumerate(class_names.split(","))} if class_names else None
+    )
     models = []
     for spec in model_specs:
         parts = spec.split(":")
         if len(parts) != 3:
             raise ValueError(f"Invalid --model format '{spec}', expected id:type:weight_path")
-        models.append({"model_id": parts[0], "model_type": parts[1], "weight_path": parts[2]})
+        model = {"model_id": parts[0], "model_type": parts[1], "weight_path": parts[2]}
+        if category_mapping is not None:
+            model["category_mapping"] = category_mapping
+        models.append(model)
     return models
 
 
@@ -271,7 +286,7 @@ def main():
         logger.info(f"Restricting comparison to classes: {sorted(allowed_classes)}")
 
     logger.info("Step 2: initializing model(s)")
-    verify_configs = {"image_size": args.image_size, "models": parse_models(args.model)}
+    verify_configs = {"image_size": args.image_size, "models": parse_models(args.model, args.model_class_names)}
     ai_verify = AIVerify(verify_configs)
 
     logger.info("Step 3: comparing new model predictions vs. human annotations per task")
