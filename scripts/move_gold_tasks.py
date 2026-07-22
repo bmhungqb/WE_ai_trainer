@@ -19,7 +19,7 @@ On top of the exact-match check, a task is only eligible for gold if:
   - its human annotation contains at least one stain, weaving, and/or
     ignore box (tasks made up solely of other classes, e.g. only
     pleat/hard_pleat, are excluded), AND
-  - every weaving-class human box is a tall, thin streak: height > 3x width.
+  - every weaving-class human box is a tall, thin streak: height > 1.5x width.
 
 Moving a task = importing it (with its existing annotation as the task's
 data + a completed annotation) into the target project via the Label Studio
@@ -137,7 +137,7 @@ def is_exact_match(predicted: list, human: list, iou_threshold: float) -> bool:
 
 GOLD_REQUIRED_CLASSES = {"stain", "weaving", "ignore"}
 WEAVING_LABEL = "weaving"
-WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO = 3.0
+WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO = 1.5
 
 
 def has_required_class(human: list) -> bool:
@@ -149,7 +149,7 @@ def has_required_class(human: list) -> bool:
 
 def weaving_boxes_pass_shape(human: list) -> bool:
     """Every weaving-class human box must be a tall, thin streak: height
-    > 3x width. If any weaving box fails this, the task isn't gold."""
+    > 1.5x width. If any weaving box fails this, the task isn't gold."""
     for h in human:
         if _canonical(h["label"]) != WEAVING_LABEL:
             continue
