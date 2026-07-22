@@ -29,6 +29,17 @@ Usage:
       --project-id 23 \
       --model 1:rfdetrMedium:weights/weight_rfdetr_m_june_v2.pth \
       --confidence-threshold 0.5 --iou-threshold 0.5
+
+    # Only re-check tasks cloned for the latest training run (task_id >= 198255),
+    # and only compare on the classes that model was actually trained on -
+    # human boxes for any other class (e.g. pleat/hard_pleat) are dropped
+    # before matching, so they can't show up as false "missed detections":
+    python scripts/push_disagreement_predictions.py \
+      --project-id 23 \
+      --model 1:rfdetrMedium:weights/weight_rfdetr_m_stain_weaving_ignore.pth \
+      --min-task-id 198255 \
+      --classes stain weaving ignore \
+      --confidence-threshold 0.5 --iou-threshold 0.5
 """
 
 import argparse
@@ -135,6 +146,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--min-task-id", type=int, default=None, help="Only re-check tasks with id >= this value"
+    )
+    parser.add_argument(
+        "--classes",
+        nargs="+",
+        default=None,
+        metavar="CLASS",
+        help="Restrict comparison to these class names (canonicalized via CANONICAL_LABELS): "
+             "human boxes and model predictions for any other class are dropped before "
+             "IoU-matching. Defaults to all classes if omitted.",
+    )
     parser.add_argument("--page-size", type=int, default=50, help="Label Studio task pagination page size")
     parser.add_argument("--dry-run", action="store_true", help="Run inference and report disagreements, but don't push predictions")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
@@ -239,6 +262,13 @@ def main():
     if not tasks:
         logger.error("No tasks found, aborting")
         return 1
+    if args.min_task_id is not None:
+        tasks = [t for t in tasks if t.get("id", 0) >= args.min_task_id]
+        logger.info(f"Filtered to {len(tasks)} task(s) with id >= {args.min_task_id}")
+
+    allowed_classes = {_canonical(c) for c in args.classes} if args.classes else None
+    if allowed_classes:
+        logger.info(f"Restricting comparison to classes: {sorted(allowed_classes)}")
 
     logger.info("Step 2: initializing model(s)")
     verify_configs = {"image_size": args.image_size, "models": parse_models(args.model)}
@@ -258,6 +288,8 @@ def main():
             skipped += 1
             continue
         human_annos = to_xyxy(sample["annos"])
+        if allowed_classes is not None:
+            human_annos = [h for h in human_annos if _canonical(h["label"]) in allowed_classes]
 
         raw_image = task.get("data", {}).get("image", "")
         gcs_image_url = resolve_image_url(raw_image)
@@ -279,6 +311,8 @@ def main():
             pre_annotations.append(ai_verify.inference_with_sahi(model, image))
         final_annotations = ai_verify.merge_predictions(pre_annotations)
         final_annotations = [a for a in final_annotations if a.confidence >= args.confidence_threshold]
+        if allowed_classes is not None:
+            final_annotations = [a for a in final_annotations if _canonical(a.defect_type) in allowed_classes]
 
         if not has_disagreement(final_annotations, human_annos, args.iou_threshold):
             logger.info(f"[{i}/{len(tasks)}] task {task_id}: agrees with human annotation, skipping")
