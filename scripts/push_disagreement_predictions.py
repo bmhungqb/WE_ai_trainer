@@ -147,11 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-class-names",
         default=None,
-        help="Comma-separated class names in the model's output category-id order, e.g. "
-             "'stain,weaving' for a 2-class checkpoint. Applies to all --model entries. "
-             "Defaults to the full DEFECT_CLASSES mapping if omitted - required whenever the "
-             "model wasn't trained on the full 5-class vocabulary, otherwise predicted "
-             "category ids get mapped to the wrong class names.",
+        help="Comma-separated id:name pairs mapping the model's output category ids to class "
+             "names, e.g. '0:pleat,1:stain,2:weaving,4:ignore' for a checkpoint whose category "
+             "ids are not consecutive from 0 (id 3/hard_pleat skipped here). Applies to all "
+             "--model entries. Defaults to the full DEFECT_CLASSES mapping if omitted - "
+             "required whenever the model's category ids don't match DEFECT_CLASSES exactly, "
+             "otherwise predicted category ids get mapped to the wrong class names (or None).",
     )
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
@@ -174,9 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
-    category_mapping = (
-        {i: name.strip() for i, name in enumerate(class_names.split(","))} if class_names else None
-    )
+    category_mapping = None
+    if class_names:
+        category_mapping = {}
+        for entry in class_names.split(","):
+            id_str, name = entry.split(":", 1)
+            category_mapping[int(id_str)] = name.strip()
     models = []
     for spec in model_specs:
         parts = spec.split(":")
