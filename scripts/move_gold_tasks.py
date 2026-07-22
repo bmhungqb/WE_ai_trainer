@@ -30,6 +30,15 @@ Tasks whose image URL already exists in the target project are skipped
 before inference even runs, so re-running this script is safe / idempotent
 - it never double-imports a task that's already been moved.
 
+--no-human-annotation: for tasks with NO human annotation at all, skip the
+exact-match comparison (there's nothing to compare against) and instead
+move the task if the model detects any weaving box (passing
+--confidence-threshold) with height > 2x width. The detected box(es) are
+imported into the target project as the task's completed annotation - i.e.
+the model's detection becomes the task's label. Tasks that DO have a human
+annotation still go through the normal exact-match gates even when this
+flag is set.
+
 Requires a GPU environment (torch, rfdetr, rfdetr_plus, sahi) to run
 inference - not executed in this repo's dev sandbox.
 
@@ -44,6 +53,13 @@ Usage:
       --source-project-id 23 --target-project-id 45 \
       --model 1:rfdetrMedium:weights/weight_rfdetr_m_june_v2.pth \
       --dry-run
+
+    # Unannotated tasks: move on any detected weaving box (height > 2x width)
+    python scripts/move_gold_tasks.py \
+      --source-project-id 24 --target-project-id 25 \
+      --model 1:rfdetrMedium:rfdetr_output/rfdetr_output_gold_v1/checkpoint_best_total.pth \
+      --model-class-names stain,weaving --classes weaving \
+      --confidence-threshold 0.5 --no-human-annotation
 """
 
 import argparse
@@ -138,6 +154,10 @@ def is_exact_match(predicted: list, human: list, iou_threshold: float) -> bool:
 GOLD_REQUIRED_CLASSES = {"stain", "weaving", "ignore"}
 WEAVING_LABEL = "weaving"
 WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO = 1.5
+# Looser ratio for the no-human-annotation path (--no-human-annotation): any
+# detected weaving box passing confidence + this shape check is moved,
+# without a human box to cross-check against.
+DETECTED_WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO = 2.0
 
 
 def has_required_class(human: list) -> bool:
@@ -147,17 +167,60 @@ def has_required_class(human: list) -> bool:
     return any(_canonical(h["label"]) in GOLD_REQUIRED_CLASSES for h in human)
 
 
+def box_passes_shape(bbox: list, min_ratio: float) -> bool:
+    """A box is a tall, thin streak if height > min_ratio x width."""
+    x1, y1, x2, y2 = bbox
+    width, height = x2 - x1, y2 - y1
+    return width > 0 and height > min_ratio * width
+
+
 def weaving_boxes_pass_shape(human: list) -> bool:
     """Every weaving-class human box must be a tall, thin streak: height
     > 1.5x width. If any weaving box fails this, the task isn't gold."""
     for h in human:
         if _canonical(h["label"]) != WEAVING_LABEL:
             continue
-        x1, y1, x2, y2 = h["bbox"]
-        width, height = x2 - x1, y2 - y1
-        if width <= 0 or height <= WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO * width:
+        if not box_passes_shape(h["bbox"], WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO):
             return False
     return True
+
+
+def find_qualifying_detected_weaving_boxes(predicted: list) -> list:
+    """No-human-annotation path: return detected weaving boxes (already
+    confidence-filtered by the caller) whose height > 2x width."""
+    return [
+        pred for pred in predicted
+        if _canonical(pred.defect_type) == WEAVING_LABEL
+        and box_passes_shape(pred.bbox, DETECTED_WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO)
+    ]
+
+
+def build_annotation_result(annotations, origin_width: int, origin_height: int) -> list:
+    """Convert Annotation objects (pixel [x1,y1,x2,y2] bbox) into a Label
+    Studio rectanglelabels result list, same percent-based format as
+    push_disagreement_predictions.py::build_prediction_result, so detected
+    boxes can be imported as a completed annotation."""
+    result = []
+    for anno in annotations:
+        bbox = anno.bbox
+        if not bbox or len(bbox) != 4 or any(v is None or v != v or v < 0 for v in bbox):
+            continue
+        result.append({
+            "from_name": "label",
+            "to_name": "image",
+            "type": "rectanglelabels",
+            "original_width": origin_width,
+            "original_height": origin_height,
+            "value": {
+                "x": (bbox[0] / origin_width) * 100,
+                "y": (bbox[1] / origin_height) * 100,
+                "width": ((bbox[2] - bbox[0]) / origin_width) * 100,
+                "height": ((bbox[3] - bbox[1]) / origin_height) * 100,
+                "rotation": 0,
+                "rectanglelabels": [anno.defect_type],
+            },
+        })
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,6 +259,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restrict comparison to these class names (canonicalized via CANONICAL_LABELS): "
              "human boxes and model predictions for any other class are dropped before "
              "IoU-matching. Defaults to all classes if omitted.",
+    )
+    parser.add_argument(
+        "--no-human-annotation",
+        action="store_true",
+        help="Tasks have no human annotation. Instead of the exact-match comparison, move a "
+             "task if the model detects any weaving box (passing --confidence-threshold) with "
+             f"height > {DETECTED_WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO}x width. The detected "
+             "box(es) are imported into the target project as the task's completed annotation. "
+             "Tasks that DO have a human annotation still go through the normal exact-match path.",
     )
     parser.add_argument("--page-size", type=int, default=50, help="Label Studio task pagination page size")
     parser.add_argument(
@@ -272,20 +344,23 @@ def download_image_from_gcs(bucket_client_cache: dict, gcs_image_url: str) -> Im
     return Image.open(BytesIO(image_bytes)).convert("RGB")
 
 
-def import_task_to_target(target_project, target_project_id: int, task: dict) -> bool:
-    """Import one task (its original "data" + its final annotation, verbatim)
-    into the target project via Project.import_tasks, so the task's human
-    annotation carries over as a completed annotation rather than just raw
-    data."""
+def import_task_to_target(target_project, target_project_id: int, task: dict, result_override: list = None) -> bool:
+    """Import one task into the target project via Project.import_tasks.
+
+    By default carries over the task's existing human annotation(s)
+    verbatim as completed annotations. If result_override is given (the
+    no-human-annotation path), it's imported instead as a single completed
+    annotation built from the model's detected boxes."""
     logger = get_logger(__name__)
-    annotations = task.get("annotations", [])
-    payload = [{
-        "data": task["data"],
-        "annotations": [
+    if result_override is not None:
+        payload_annotations = [{"result": result_override, "was_cancelled": False}]
+    else:
+        annotations = task.get("annotations", [])
+        payload_annotations = [
             {"result": a["result"], "was_cancelled": a.get("was_cancelled", False)}
             for a in annotations
-        ],
-    }]
+        ]
+    payload = [{"data": task["data"], "annotations": payload_annotations}]
 
     try:
         target_project.import_tasks(payload)
@@ -340,15 +415,6 @@ def main():
     for i, task in enumerate(tasks, 1):
         task_id = task["id"]
 
-        sample = process_task(task)
-        if not sample:
-            logger.info(f"[{i}/{len(tasks)}] task {task_id}: no human annotation, skipping")
-            skipped += 1
-            continue
-        human_annos = to_xyxy(sample["annos"])
-        if allowed_classes is not None:
-            human_annos = [h for h in human_annos if _canonical(h["label"]) in allowed_classes]
-
         raw_image = task.get("data", {}).get("image", "")
         gcs_image_url = resolve_image_url(raw_image)
         if not gcs_image_url.startswith("gs://"):
@@ -361,14 +427,31 @@ def main():
             skipped += 1
             continue
 
-        if not has_required_class(human_annos):
-            logger.info(f"[{i}/{len(tasks)}] task {task_id}: no stain/weaving/ignore box, skipping")
-            kept += 1
+        sample = process_task(task)
+        has_human_annotation = bool(sample)
+
+        if not has_human_annotation and not args.no_human_annotation:
+            logger.info(f"[{i}/{len(tasks)}] task {task_id}: no human annotation, skipping")
+            skipped += 1
             continue
-        if not weaving_boxes_pass_shape(human_annos):
-            logger.info(f"[{i}/{len(tasks)}] task {task_id}: weaving box fails height>3x width shape check, skipping")
-            kept += 1
-            continue
+
+        human_annos = None
+        if has_human_annotation:
+            # Tasks WITH a human annotation always go through the normal
+            # exact-match gates, even when --no-human-annotation is set
+            # (that flag only changes behavior for tasks with none).
+            human_annos = to_xyxy(sample["annos"])
+            if allowed_classes is not None:
+                human_annos = [h for h in human_annos if _canonical(h["label"]) in allowed_classes]
+
+            if not has_required_class(human_annos):
+                logger.info(f"[{i}/{len(tasks)}] task {task_id}: no stain/weaving/ignore box, skipping")
+                kept += 1
+                continue
+            if not weaving_boxes_pass_shape(human_annos):
+                logger.info(f"[{i}/{len(tasks)}] task {task_id}: weaving box fails shape check, skipping")
+                kept += 1
+                continue
 
         try:
             image = download_image_from_gcs(bucket_client_cache, gcs_image_url)
@@ -385,13 +468,28 @@ def main():
         if allowed_classes is not None:
             final_annotations = [a for a in final_annotations if _canonical(a.defect_type) in allowed_classes]
 
-        if not is_exact_match(final_annotations, human_annos, args.iou_threshold):
-            logger.info(f"[{i}/{len(tasks)}] task {task_id}: does not exactly match model predictions, keeping in source")
-            kept += 1
-            continue
+        result_override = None
+        if has_human_annotation:
+            if not is_exact_match(final_annotations, human_annos, args.iou_threshold):
+                logger.info(f"[{i}/{len(tasks)}] task {task_id}: does not exactly match model predictions, keeping in source")
+                kept += 1
+                continue
+            gold_reason = f"exact match, {len(human_annos)} box(es)"
+        else:
+            qualifying = find_qualifying_detected_weaving_boxes(final_annotations)
+            if not qualifying:
+                logger.info(
+                    f"[{i}/{len(tasks)}] task {task_id}: no qualifying detected weaving box "
+                    f"(height>{DETECTED_WEAVING_MIN_HEIGHT_TO_WIDTH_RATIO}x width), skipping"
+                )
+                kept += 1
+                continue
+            width, height = image.size
+            result_override = build_annotation_result(qualifying, width, height)
+            gold_reason = f"detected weaving, {len(qualifying)} box(es)"
 
         logger.info(
-            f"[{i}/{len(tasks)}] task {task_id}: GOLD (exact match, {len(human_annos)} box(es)), "
+            f"[{i}/{len(tasks)}] task {task_id}: GOLD ({gold_reason}), "
             f"{'(dry-run) would move' if args.dry_run else 'moving'} to project {args.target_project_id}"
         )
 
@@ -399,7 +497,7 @@ def main():
             moved += 1
             continue
 
-        if not import_task_to_target(target_project, args.target_project_id, task):
+        if not import_task_to_target(target_project, args.target_project_id, task, result_override=result_override):
             failed += 1
             continue
 
