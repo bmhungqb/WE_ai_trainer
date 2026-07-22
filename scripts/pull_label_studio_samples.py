@@ -7,6 +7,7 @@ Usage:
     python scripts/pull_label_studio_samples.py --project-id 23           # pull ALL annotated samples
     python scripts/pull_label_studio_samples.py --project-id 23 --limit 5  # pull only the first 5 annotated samples
     python scripts/pull_label_studio_samples.py --project-id 23 --include-negatives  # also keep negative samples
+    python scripts/pull_label_studio_samples.py --project-id 23 --min-task-id 198255 --include-negatives
 
 Reads LABEL_STUDIO_URL / LABEL_STUDIO_API_KEY from the environment (.env).
 """
@@ -42,6 +43,7 @@ def pull_sample(
     created_after: datetime.date | None = None,
     created_before: datetime.date | None = None,
     include_negatives: bool = False,
+    min_task_id: int | None = None,
 ):
     ls = Client(url, api_key)
     project = ls.get_project(project_id)
@@ -69,6 +71,8 @@ def pull_sample(
         scanned += len(tasks)
 
         for task in tasks:
+            if min_task_id is not None and task.get("id", 0) < min_task_id:
+                continue
             if created_after is not None or created_before is not None:
                 created_at_str = task.get("created_at")
                 if not created_at_str:
@@ -113,7 +117,8 @@ def pull_sample(
 
     logger.info(
         f"Scanned {scanned} task(s), kept {len(coco_output_format['images'])} sample(s) "
-        f"(negatives {'included' if include_negatives else 'excluded'}) from project {project_id}"
+        f"(negatives {'included' if include_negatives else 'excluded'}"
+        f"{f', min_task_id={min_task_id}' if min_task_id is not None else ''}) from project {project_id}"
     )
 
     for category_id, category_name in DEFECT_CLASSES.items():
@@ -151,6 +156,9 @@ def main():
         help="Keep negative samples (reviewed tasks with no defect annotations) in the output"
     )
     parser.add_argument(
+        "--min-task-id", type=int, default=None, help="Only pull tasks with id >= this value"
+    )
+    parser.add_argument(
         "--output",
         default=f"tmp/annotations_project23_sample_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
     )
@@ -172,6 +180,7 @@ def main():
         url, api_key, args.project_id, args.limit, args.output,
         created_after=created_after, created_before=created_before,
         include_negatives=args.include_negatives,
+        min_task_id=args.min_task_id,
     )
 
     print(f"Done. Output: {path}")
