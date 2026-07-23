@@ -1,22 +1,33 @@
 """
 Read a local COCO dataset (e.g. dataset_gold/, output of
-build_train_valid_dataset.py), run an RFDETR model built with a near-zero
-confidence threshold (--min-confidence, default 0.01 - effectively no
-filtering), and compute a per-class precision-recall curve (swept over
-confidence threshold) plus the threshold that maximizes F1 for each class -
-answers "what --class-confidence-threshold should I actually use per
-class" before running scripts/move_review_tasks.py.
+build_train_valid_dataset.py), run an RFDETR model DIRECTLY on each whole
+image (no SAHI/tiling), and compute a per-class precision-recall curve
+(swept over confidence threshold) plus the threshold that maximizes F1 for
+each class - answers "what --class-confidence-threshold should I actually
+use per class" before running scripts/move_review_tasks.py.
+
+Uses RFDETR's own .predict(image, threshold=...) instead of
+src/ai_verify.py's SAHI-sliced inference_with_sahi(): at a near-zero
+confidence threshold, SAHI's get_sliced_prediction crashes converting raw
+low-confidence boxes into its ObjectPrediction/BoundingBox type (some come
+back with a negative coordinate, e.g. a box whose center sits near a slice
+edge, which SAHI's own validator then rejects) - a real gap in SAHI's box
+handling, not something fixable by nudging the threshold. Since this
+dataset's images are already single-tile size (~576x576, no larger than
+the model's input resolution), slicing isn't needed anyway - running
+.predict() straight on the full image sidesteps the crash entirely and is
+simpler.
 
 Same PR-curve math as scripts/compute_pr_curves.py::match_class_predictions
 / build_pr_curve (greedy highest-confidence-first IoU matching per image,
 each GT box claimed at most once). Unlike
 scripts/evaluate_class_thresholds.py (which pulls tasks + images from a
-Label Studio project over the network), this reads images and ground truth
-directly off disk - no LABEL_STUDIO_URL / GCS access needed, just the
-dataset directory.
+Label Studio project over the network via SAHI), this reads images and
+ground truth directly off disk - no LABEL_STUDIO_URL / GCS access needed,
+just the dataset directory.
 
-Requires a GPU environment (torch, rfdetr, rfdetr_plus, sahi) to run
-inference - not executed in this repo's dev sandbox.
+Requires a GPU environment (torch, rfdetr, rfdetr_plus) to run inference -
+not executed in this repo's dev sandbox.
 
 Reads:
     <dataset>/train/_annotations.coco.json + images
@@ -58,8 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.logger import setup_logger, get_logger
-from utils.constants import CANONICAL_LABELS
-from src.ai_verify import AIVerify
+from utils.constants import CANONICAL_LABELS, DEFECT_CLASSES
 
 
 def _canonical(label: str) -> str:
@@ -149,10 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", choices=["train", "valid", "both"], default="both", help="Which split(s) to evaluate")
     parser.add_argument(
         "--model",
-        nargs="+",
         metavar="ID:TYPE:WEIGHT_PATH",
         required=True,
-        help="Detection model(s) to evaluate, as id:type:weight_path (repeatable)",
+        help="Detection model to evaluate, as id:type:weight_path. Exactly one model - "
+             "per-class threshold tuning needs each prediction's own confidence score, "
+             "which multi-model merging (as in src/ai_verify.py) would blend away.",
     )
     parser.add_argument(
         "--model-class-names",
@@ -161,38 +172,47 @@ def build_parser() -> argparse.ArgumentParser:
              "names, e.g. '0:pleat,1:stain,2:weaving,4:ignore'. Defaults to the full "
              "DEFECT_CLASSES mapping if omitted.",
     )
-    parser.add_argument("--image-size", type=int, nargs=2, metavar=("W", "H"), default=[576, 576], help="Expected raw image size")
-    parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument(
         "--min-confidence", type=float, default=0.01,
-        help="Confidence threshold to build the model(s) with. Must stay just above 0.0 - at "
-             "exactly 0.0, SAHI's postprocessing lets through degenerate/negative-coordinate "
-             "boxes from the raw model output that its own BoundingBox validation then rejects, "
-             "crashing get_sliced_prediction. A small positive value still captures effectively "
-             "the full score range for the PR curve while avoiding that crash.",
+        help="Confidence threshold passed to model.predict(). Kept just above 0.0 so the "
+             "PR curve still covers effectively the full prediction score range.",
     )
+    parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--report", default="reports/class_thresholds_local.json", help="Output report path")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
 
 
-def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
-    category_mapping = None
-    if class_names:
-        category_mapping = {}
-        for entry in class_names.split(","):
-            id_str, name = entry.split(":", 1)
-            category_mapping[int(id_str)] = name.strip()
-    models = []
-    for spec in model_specs:
-        parts = spec.split(":")
-        if len(parts) != 3:
-            raise ValueError(f"Invalid --model format '{spec}', expected id:type:weight_path")
-        model = {"model_id": parts[0], "model_type": parts[1], "weight_path": parts[2]}
-        if category_mapping is not None:
-            model["category_mapping"] = category_mapping
-        models.append(model)
-    return models
+def parse_category_mapping(class_names: str | None) -> dict:
+    if not class_names:
+        return DEFECT_CLASSES
+    category_mapping = {}
+    for entry in class_names.split(","):
+        id_str, name = entry.split(":", 1)
+        category_mapping[int(id_str)] = name.strip()
+    return category_mapping
+
+
+def build_model(model_spec: str):
+    """Instantiate the RFDETR model directly (no SAHI/AutoDetectionModel
+    wrapper) - .predict() is called straight on the whole image."""
+    from rfdetr import RFDETRMedium, RFDETRLarge
+    from rfdetr_plus import RFDETRXLarge
+
+    parts = model_spec.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"Invalid --model format '{model_spec}', expected id:type:weight_path")
+    _model_id, model_type, weight_path = parts
+    if model_type == "rfdetrMedium":
+        model = RFDETRMedium(pretrain_weights=weight_path)
+    elif model_type == "rfdetrLarge":
+        model = RFDETRLarge(pretrain_weights=weight_path)
+    elif model_type == "rfdetrXLarge":
+        model = RFDETRXLarge(pretrain_weights=weight_path)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+    model.optimize_for_inference()
+    return model
 
 
 def load_coco_split(split_dir: Path):
@@ -240,13 +260,9 @@ def main():
         logger.error("No images found, aborting")
         return 1
 
-    logger.info(f"Step 1: initializing model(s) (confidence_threshold={args.min_confidence} - near-zero, we need the full score range)")
-    verify_configs = {
-        "image_size": args.image_size,
-        "models": parse_models(args.model, args.model_class_names),
-        "confidence_threshold": args.min_confidence,
-    }
-    ai_verify = AIVerify(verify_configs)
+    category_mapping = parse_category_mapping(args.model_class_names)
+    logger.info(f"Step 1: initializing model (confidence_threshold={args.min_confidence} - near-zero, we need the full score range)")
+    model = build_model(args.model)
 
     logger.info("Step 2: running inference per image and collecting per-class predictions vs. GT")
 
@@ -267,20 +283,17 @@ def main():
             n_failed += 1
             continue
 
-        pre_annotations = []
-        for model in ai_verify.models:
-            pre_annotations.append(ai_verify.inference_with_sahi(model, image))
-        final_annotations = ai_verify.merge_predictions(pre_annotations)
+        detections = model.predict(image, threshold=args.min_confidence)
 
         gt_by_class = defaultdict(list)
         for h in img["annos"]:
             gt_by_class[h["label"]].append(h["bbox"])
             gt_counts[h["label"]] += 1
 
-        for pred in final_annotations:
-            cls = _canonical(pred.defect_type)
+        for bbox, confidence, class_id in zip(detections.xyxy, detections.confidence, detections.class_id):
+            cls = _canonical(category_mapping.get(int(class_id), str(int(class_id))))
             gt_boxes = gt_by_class.get(cls, [])
-            per_class_preds[cls].append((pred.confidence, pred.bbox, gt_boxes))
+            per_class_preds[cls].append((float(confidence), [float(v) for v in bbox], gt_boxes))
 
         n_evaluated += 1
         if n_evaluated % 50 == 0:
