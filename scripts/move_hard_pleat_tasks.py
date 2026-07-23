@@ -1,7 +1,8 @@
 """
 Move every annotated task in a Label Studio project whose human annotation
-contains at least one "hard_pleat" class box into a separate project - no
-model inference involved, this is a pure human-annotation filter.
+contains ONLY "hard_pleat" class boxes (no other class mixed in, at least
+one box present) into a separate project - no model inference involved,
+this is a pure human-annotation filter.
 
 Tasks whose image URL already exists in the target project are skipped, so
 re-running this script is safe / idempotent - it never double-imports a
@@ -42,8 +43,10 @@ def _canonical(label: str) -> str:
     return CANONICAL_LABELS.get(label, label)
 
 
-def has_hard_pleat_class(human_annos: list) -> bool:
-    return any(_canonical(a["label"]) == HARD_PLEAT_LABEL for a in human_annos)
+def is_only_hard_pleat(human_annos: list) -> bool:
+    """True iff every box in the annotation is hard_pleat and there's at
+    least one box (an empty/negative-sample annotation doesn't count)."""
+    return bool(human_annos) and all(_canonical(a["label"]) == HARD_PLEAT_LABEL for a in human_annos)
 
 
 def resolve_image_url(raw_image: str) -> str:
@@ -100,7 +103,7 @@ def import_task_to_target(target_project, target_project_id: int, task: dict) ->
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Move tasks containing a 'hard_pleat' class annotation into a separate project",
+        description="Move tasks whose annotation contains ONLY 'hard_pleat' class boxes into a separate project",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--source-project-id", type=int, required=True, help="Label Studio project ID to pull tasks from")
@@ -162,12 +165,12 @@ def main():
             skipped += 1
             continue
 
-        if not has_hard_pleat_class(sample["annos"]):
+        if not is_only_hard_pleat(sample["annos"]):
             kept += 1
             continue
 
         logger.info(
-            f"[{i}/{len(tasks)}] task {task_id}: contains 'hard_pleat' class, "
+            f"[{i}/{len(tasks)}] task {task_id}: contains ONLY 'hard_pleat' class ({len(sample['annos'])} box(es)), "
             f"{'(dry-run) would move' if args.dry_run else 'moving'} to project {args.target_project_id}"
         )
 
