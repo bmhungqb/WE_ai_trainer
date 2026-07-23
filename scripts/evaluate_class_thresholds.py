@@ -1,6 +1,7 @@
 """
-Pull annotated tasks from a Label Studio project, run an RFDETR model with
-NO confidence filtering, and compute a per-class precision-recall curve
+Pull annotated tasks from a Label Studio project, run an RFDETR model built
+with a near-zero confidence threshold (--min-confidence, default 0.01 -
+effectively no filtering), and compute a per-class precision-recall curve
 (swept over confidence threshold) plus the threshold that maximizes F1 for
 each class - answers "what --class-confidence-threshold should I actually
 use per class" before running scripts/move_review_tasks.py.
@@ -172,6 +173,14 @@ def build_parser() -> argparse.ArgumentParser:
              "DEFECT_CLASSES mapping if omitted.",
     )
     parser.add_argument("--iou-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--min-confidence", type=float, default=0.01,
+        help="Confidence threshold to build the model(s) with. Must stay just above 0.0 - at "
+             "exactly 0.0, SAHI's postprocessing lets through degenerate/negative-coordinate "
+             "boxes from the raw model output that its own BoundingBox validation then rejects, "
+             "crashing get_sliced_prediction. A small positive value still captures effectively "
+             "the full score range for the PR curve while avoiding that crash.",
+    )
     parser.add_argument("--min-task-id", type=int, default=None, help="Only evaluate tasks with id >= this value")
     parser.add_argument("--page-size", type=int, default=50, help="Label Studio task pagination page size")
     parser.add_argument("--report", default="reports/class_thresholds.json", help="Output report path")
@@ -265,11 +274,11 @@ def main():
         tasks = [t for t in tasks if t.get("id", 0) >= args.min_task_id]
         logger.info(f"Filtered to {len(tasks)} task(s) with id >= {args.min_task_id}")
 
-    logger.info("Step 2: initializing model(s) (confidence_threshold=0.0 - no filtering, we need the full score range)")
+    logger.info(f"Step 2: initializing model(s) (confidence_threshold={args.min_confidence} - near-zero, we need the full score range)")
     verify_configs = {
         "image_size": args.image_size,
         "models": parse_models(args.model, args.model_class_names),
-        "confidence_threshold": 0.0,
+        "confidence_threshold": args.min_confidence,
     }
     ai_verify = AIVerify(verify_configs)
 
