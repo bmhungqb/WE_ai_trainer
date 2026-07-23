@@ -27,6 +27,10 @@ Usage:
     # was run with only new_model's predictions file present):
     python scripts/build_html.py --results results --output html \
       --layers ground_truth,new_model
+
+    # Only samples where new_model missed a real defect vs. ground truth:
+    python scripts/build_html.py --results results --output html_missed \
+      --layers ground_truth,new_model --only-missed-source new_model
 """
 
 import argparse
@@ -263,13 +267,62 @@ DETAIL_HTML = """<!doctype html>
 """
 
 
-def build_manifest(results_dir: str) -> list:
+NO_DEFECT_LABEL = "Khong_co_loi"
+
+
+def _iou(box1: list, box2: list) -> float:
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+    area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
+    union = area1 + area2 - inter
+    return inter / union if union else 0.0
+
+
+def has_missed_defect(predicted: list, ground_truth: list, iou_threshold: float) -> bool:
+    """Same greedy highest-confidence-first IoU matching convention as
+    compute_comparison_metrics.py::greedy_match / analyze_missed_defects.py.
+    True if at least one real-defect GT box (i.e. excluding the no-defect
+    label) has no matching prediction of ANY class at that location -
+    regardless of whether the miss is a location miss or a wrong-class
+    match, matching compute_comparison_metrics.py's per-class fn count."""
+    defect_gt = [g for g in ground_truth if g.get("class") != NO_DEFECT_LABEL]
+    if not defect_gt:
+        return False
+
+    matched_gt = set()
+    for pred in sorted(predicted, key=lambda p: p.get("confidence", 0.0), reverse=True):
+        best_idx, best_iou = None, 0.0
+        for i, gt in enumerate(defect_gt):
+            if i in matched_gt or gt.get("class") != pred.get("class"):
+                continue
+            score = _iou(pred["bbox"], gt["bbox"])
+            if score > best_iou:
+                best_idx, best_iou = i, score
+        if best_idx is not None and best_iou >= iou_threshold:
+            matched_gt.add(best_idx)
+
+    return len(matched_gt) < len(defect_gt)
+
+
+def build_manifest(results_dir: str, only_missed_source: str = None, iou_threshold: float = 0.5) -> list:
     manifest = []
     for json_path in sorted(Path(results_dir).rglob("*.json")):
         with open(json_path, "r") as f:
             record = json.load(f)
-        folder, filename = record["image"].split("/", 1)
         annotations = record["annotations"]
+
+        if only_missed_source is not None:
+            predicted = annotations.get(only_missed_source, [])
+            ground_truth = annotations.get("ground_truth", [])
+            if not has_missed_defect(predicted, ground_truth, iou_threshold):
+                continue
+
+        folder, filename = record["image"].split("/", 1)
         classes = sorted({
             box["class"]
             for boxes in annotations.values()
@@ -303,7 +356,7 @@ def resolve_layers(layer_keys: list) -> tuple:
     return colors, labels
 
 
-def build_html(results_dir: str, output_dir: str, layers: list = None):
+def build_html(results_dir: str, output_dir: str, layers: list = None, only_missed_source: str = None, iou_threshold: float = 0.5):
     logger = get_logger(__name__)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -311,7 +364,9 @@ def build_html(results_dir: str, output_dir: str, layers: list = None):
     layer_keys = layers if layers else DEFAULT_LAYERS
     colors, labels = resolve_layers(layer_keys)
 
-    manifest = build_manifest(results_dir)
+    manifest = build_manifest(results_dir, only_missed_source=only_missed_source, iou_threshold=iou_threshold)
+    if only_missed_source is not None:
+        logger.info(f"Filtered to samples where '{only_missed_source}' missed at least one ground-truth defect")
 
     with open(output_path / "data.js", "w") as f:
         f.write("window.RFDETR_DATA = ")
@@ -340,6 +395,13 @@ def build_parser() -> argparse.ArgumentParser:
              "'ground_truth,new_model'. Defaults to ground_truth,production,rfdetr_v1,rfdetr_v2 "
              "if omitted.",
     )
+    parser.add_argument(
+        "--only-missed-source", default=None, metavar="SOURCE",
+        help="Only include samples where this annotation source (e.g. 'new_model') missed at "
+             "least one real-defect ground-truth box - same greedy IoU-matching convention as "
+             "compute_comparison_metrics.py. Omit to include every sample.",
+    )
+    parser.add_argument("--iou-threshold", type=float, default=0.5, help="IoU threshold used by --only-missed-source")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
 
@@ -349,7 +411,10 @@ def main():
     setup_logger(log_dir=args.log_dir)
 
     layers = [k.strip() for k in args.layers.split(",")] if args.layers else None
-    build_html(args.results, args.output, layers=layers)
+    build_html(
+        args.results, args.output, layers=layers,
+        only_missed_source=args.only_missed_source, iou_threshold=args.iou_threshold,
+    )
     print(f"Viewer written to {args.output}/index.html")
     print("Serve it together with results/, e.g.: python -m http.server --directory .")
     return 0
