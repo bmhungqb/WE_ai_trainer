@@ -33,6 +33,7 @@ Usage:
       --model 1:rfdetrMedium:<weight_path> \
       --model-class-names 0:pleat,1:stain,2:weaving,3:ignore \
       --confidence-threshold 0.5 \
+      --class-confidence-threshold weaving:0.3,ignore:0.7 \
       --dry-run
 """
 
@@ -143,7 +144,14 @@ def build_parser() -> argparse.ArgumentParser:
              "DEFECT_CLASSES mapping if omitted - required whenever the model's category ids "
              "don't match DEFECT_CLASSES exactly.",
     )
-    parser.add_argument("--confidence-threshold", type=float, default=0.5)
+    parser.add_argument("--confidence-threshold", type=float, default=0.5, help="Default confidence threshold, used for any class not listed in --class-confidence-threshold")
+    parser.add_argument(
+        "--class-confidence-threshold",
+        default=None,
+        help="Comma-separated class:threshold pairs to override --confidence-threshold for "
+             "specific classes (canonicalized via CANONICAL_LABELS before matching), e.g. "
+             "'weaving:0.3,ignore:0.7'. Classes not listed use --confidence-threshold.",
+    )
     parser.add_argument("--page-size", type=int, default=50, help="Label Studio task pagination page size")
     parser.add_argument(
         "--delete-source",
@@ -155,6 +163,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Report which tasks would move, but don't import or delete anything")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
+
+
+def parse_class_confidence_thresholds(spec: str | None) -> dict:
+    """'weaving:0.3,ignore:0.7' -> {"weaving": 0.3, "ignore": 0.7} (keys
+    canonicalized via CANONICAL_LABELS so old/new label vocabularies match)."""
+    if not spec:
+        return {}
+    thresholds = {}
+    for entry in spec.split(","):
+        class_name, value = entry.split(":", 1)
+        thresholds[_canonical(class_name.strip())] = float(value)
+    return thresholds
+
+
+def passes_confidence(pred, default_threshold: float, class_thresholds: dict) -> bool:
+    threshold = class_thresholds.get(_canonical(pred.defect_type), default_threshold)
+    return pred.confidence >= threshold
 
 
 def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
@@ -266,6 +291,10 @@ def main():
     already_moved_image_urls.discard("")
     logger.info(f"{len(already_moved_image_urls)} image(s) already present in target project")
 
+    class_thresholds = parse_class_confidence_thresholds(args.class_confidence_threshold)
+    if class_thresholds:
+        logger.info(f"Per-class confidence thresholds: {class_thresholds} (default {args.confidence_threshold})")
+
     logger.info("Step 2: initializing model(s)")
     verify_configs = {"image_size": args.image_size, "models": parse_models(args.model, args.model_class_names)}
     ai_verify = AIVerify(verify_configs)
@@ -305,7 +334,10 @@ def main():
         for model in ai_verify.models:
             pre_annotations.append(ai_verify.inference_with_sahi(model, image))
         final_annotations = ai_verify.merge_predictions(pre_annotations)
-        final_annotations = [a for a in final_annotations if a.confidence >= args.confidence_threshold]
+        final_annotations = [
+            a for a in final_annotations
+            if passes_confidence(a, args.confidence_threshold, class_thresholds)
+        ]
 
         triggers = find_trigger_boxes(final_annotations)
         if not triggers:

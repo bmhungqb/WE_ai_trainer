@@ -31,7 +31,7 @@ class AIVerify:
     def __init__(self, config: dict):
         logger.info("Initializing AIVerify")
         self.config = config
-        self.models = self._init_models(config['models'])
+        self.models = self._init_models(config['models'], threshold=config.get('confidence_threshold', 0.5))
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
