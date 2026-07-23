@@ -2,15 +2,19 @@
 Task 5 - Generate a static HTML viewer for qualitative comparison.
 
 Reads:
-    results/**/*.json   (output of merge_annotations.py)
+    results/**/*.json   (output of merge_annotations.py) - any annotation
+        source keys present in the merged records can be rendered as a
+        layer (ground_truth, production, rfdetr_v1, rfdetr_v2, new_model,
+        ...); use --layers to pick which ones, defaulting to the 4-layer
+        v1/v2 comparison set below for backward compatibility.
 
 Writes:
     html/data.js     - all merged annotation data, embedded as a JS constant
                         (avoids fetch()/CORS issues when opening files directly
                         from disk, e.g. file:// in a browser)
     html/index.html  - gallery: thumbnails, search by filename, filter by folder
-    html/detail.html - single image with four toggleable annotation layers
-                        (Ground Truth, Production, RFDETR v1, RFDETR v2)
+    html/detail.html - single image with toggleable annotation layers (one
+                        checkbox per --layers entry)
 
 Images are referenced via a relative path back into results/, so no image
 copying is needed. Serve the html/ and results/ directories together, e.g.:
@@ -18,6 +22,11 @@ copying is needed. Serve the html/ and results/ directories together, e.g.:
 
 Usage:
     python scripts/build_html.py --results results --output html
+
+    # Just ground truth vs. your new model (e.g. after merge_annotations.py
+    # was run with only new_model's predictions file present):
+    python scripts/build_html.py --results results --output html \
+      --layers ground_truth,new_model
 """
 
 import argparse
@@ -29,18 +38,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.logger import setup_logger, get_logger
 
+DEFAULT_LAYERS = ["ground_truth", "production", "rfdetr_v1", "rfdetr_v2"]
+
 LAYER_COLORS = {
     "ground_truth": "#2ecc71",
     "production": "#3498db",
     "rfdetr_v1": "#e67e22",
     "rfdetr_v2": "#e74c3c",
+    "new_model": "#e74c3c",
 }
 LAYER_LABELS = {
     "ground_truth": "Ground Truth",
     "production": "Production",
     "rfdetr_v1": "RFDETR v1",
     "rfdetr_v2": "RFDETR v2",
+    "new_model": "New Model",
 }
+# Cycled through for any layer key not covered above (e.g. a custom source
+# name), so an unrecognized --layers value never crashes the build.
+FALLBACK_COLORS = ["#9b59b6", "#1abc9c", "#f1c40f", "#95a5a6"]
 
 INDEX_HTML = """<!doctype html>
 <html>
@@ -271,10 +287,29 @@ def build_manifest(results_dir: str) -> list:
     return manifest
 
 
-def build_html(results_dir: str, output_dir: str):
+def resolve_layers(layer_keys: list) -> tuple:
+    """Build (colors, labels) dicts scoped to just the requested layer keys,
+    falling back to FALLBACK_COLORS/title-cased key name for any key not in
+    the known LAYER_COLORS/LAYER_LABELS (e.g. a custom source name)."""
+    colors, labels = {}, {}
+    next_fallback = 0
+    for key in layer_keys:
+        if key in LAYER_COLORS:
+            colors[key] = LAYER_COLORS[key]
+        else:
+            colors[key] = FALLBACK_COLORS[next_fallback % len(FALLBACK_COLORS)]
+            next_fallback += 1
+        labels[key] = LAYER_LABELS.get(key, key.replace("_", " ").title())
+    return colors, labels
+
+
+def build_html(results_dir: str, output_dir: str, layers: list = None):
     logger = get_logger(__name__)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    layer_keys = layers if layers else DEFAULT_LAYERS
+    colors, labels = resolve_layers(layer_keys)
 
     manifest = build_manifest(results_dir)
 
@@ -286,12 +321,12 @@ def build_html(results_dir: str, output_dir: str):
     with open(output_path / "index.html", "w") as f:
         f.write(INDEX_HTML)
 
-    detail_html = DETAIL_HTML.replace("__LAYER_COLORS__", json.dumps(LAYER_COLORS))
-    detail_html = detail_html.replace("__LAYER_LABELS__", json.dumps(LAYER_LABELS))
+    detail_html = DETAIL_HTML.replace("__LAYER_COLORS__", json.dumps(colors))
+    detail_html = detail_html.replace("__LAYER_LABELS__", json.dumps(labels))
     with open(output_path / "detail.html", "w") as f:
         f.write(detail_html)
 
-    logger.info(f"Generated HTML viewer for {len(manifest)} samples in {output_path}")
+    logger.info(f"Generated HTML viewer for {len(manifest)} samples in {output_path} (layers: {', '.join(layer_keys)})")
     return len(manifest)
 
 
@@ -299,6 +334,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate a static HTML viewer for qualitative comparison")
     parser.add_argument("--results", default="results", help="Merged results directory")
     parser.add_argument("--output", default="html", help="Output directory for the HTML viewer")
+    parser.add_argument(
+        "--layers", default=None,
+        help="Comma-separated annotation source keys to render as toggleable layers, e.g. "
+             "'ground_truth,new_model'. Defaults to ground_truth,production,rfdetr_v1,rfdetr_v2 "
+             "if omitted.",
+    )
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
 
@@ -307,7 +348,8 @@ def main():
     args = build_parser().parse_args()
     setup_logger(log_dir=args.log_dir)
 
-    build_html(args.results, args.output)
+    layers = [k.strip() for k in args.layers.split(",")] if args.layers else None
+    build_html(args.results, args.output, layers=layers)
     print(f"Viewer written to {args.output}/index.html")
     print("Serve it together with results/, e.g.: python -m http.server --directory .")
     return 0
