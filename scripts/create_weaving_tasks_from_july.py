@@ -1,30 +1,37 @@
 """
 Run the new model over the already-downloaded local dataset_july/ folder
 (same layout as scripts/download_dataset.py's output: <folder>/<name>.jpg +
-<name>.json), and for every image where the model detects at least one
-"ignore" box, create a brand-new Label Studio task in a target project -
-the detected box(es) are attached as a prediction (pre-annotation) for a
-human reviewer to confirm, not a completed annotation.
+<name>.json), and for every image where EITHER
+
+    - the model detects at least one "weaving" box, OR
+    - the sample's own worker-corrected ground truth ("gt" field in the
+      JSON sidecar) is Loi_soi / weaving (same label, old VN-underscore vs.
+      new English name - see utils/constants.py::CANONICAL_LABELS)
+
+create a brand-new Label Studio task in a target project. Only the model's
+detected boxes are attached as a prediction (pre-annotation) for a human
+reviewer to confirm - ground truth alone, with no model detection, still
+qualifies the image but contributes no prediction boxes (nothing to
+attach), so the reviewer draws the box themselves.
+
+Only new images are created: any image already present in the target
+project (matched by its GCS gs://<bucket>/<folder>/<filename> path,
+independent of the signed-URL query string) is skipped entirely.
 
 Does NOT pull anything from GCS - if dataset_july/ doesn't exist locally,
 this aborts with an error telling you to run scripts/download_dataset.py
 first (or point --dataset at wherever it actually lives).
 
 Each new task's "data.image" is a signed HTTPS URL (google.cloud.storage
-Blob.generate_signed_url, --signed-url-days validity) for
-gs://<bucket>/<folder>/<filename> (mirroring the local <folder>/<filename>
-layout back onto the GCS bucket it was downloaded from - see
-scripts/download_dataset.py). A raw gs:// URI does NOT work here: unlike
-tasks Label Studio's own Cloud Storage sync creates (which it resolves
-server-side), tasks created via the API/import_tasks are rendered directly
-in the browser, which can't fetch gs:// at all - it needs a plain https://
-URL, which is what the signing step produces.
+Blob.generate_signed_url, --signed-url-days validity), same as
+scripts/create_ignore_tasks_from_july.py - a raw gs:// URI can't be
+rendered by the browser for a task created via the API.
 
 Requires a GPU environment (torch, rfdetr, rfdetr_plus, sahi) to run
 inference - not executed in this repo's dev sandbox.
 
 Usage:
-    python scripts/create_ignore_tasks_from_july.py \
+    python scripts/create_weaving_tasks_from_july.py \
       --dataset dataset_july \
       --target-project-id 25 \
       --model 1:rfdetrMedium:<weight_path> \
@@ -32,7 +39,7 @@ Usage:
       --confidence-threshold 0.5
 
     # Dry-run: report which images would get a new task, without creating anything
-    python scripts/create_ignore_tasks_from_july.py \
+    python scripts/create_weaving_tasks_from_july.py \
       --dataset dataset_july \
       --target-project-id 25 \
       --model 1:rfdetrMedium:<weight_path> \
@@ -41,6 +48,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -51,17 +59,34 @@ from label_studio_sdk import Client
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.logger import setup_logger, get_logger
-from utils.constants import CANONICAL_LABELS
+from utils.constants import CANONICAL_LABELS, DEFECT_CLASSES
 from src.ai_verify import AIVerify
 
 load_dotenv()
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
-IGNORE_LABEL = "ignore"
+WEAVING_LABEL = "weaving"
 
 
 def _canonical(label: str) -> str:
     return CANONICAL_LABELS.get(label, label)
+
+
+def _gt_label_for(raw_label) -> str:
+    """Same normalization as merge_annotations.py::_label_for - a raw "gt"
+    value can be an int class index or any of the old VN-underscore / new
+    English label vocabularies; canonicalize onto one class name."""
+    if raw_label is None:
+        return "unknown"
+    if isinstance(raw_label, str) and raw_label.lstrip("-").isdigit():
+        raw_label = int(raw_label)
+    if isinstance(raw_label, int):
+        raw_label = DEFECT_CLASSES.get(raw_label, str(raw_label))
+    return CANONICAL_LABELS.get(raw_label, str(raw_label))
+
+
+def ground_truth_is_weaving(sample_json: dict) -> bool:
+    return _gt_label_for(sample_json.get("gt")) == WEAVING_LABEL
 
 
 def sign_gcs_url(bucket_cache: dict, bucket_name: str, blob_path: str, days: int) -> str:
@@ -85,6 +110,52 @@ def sign_gcs_url(bucket_cache: dict, bucket_name: str, blob_path: str, days: int
     )
 
 
+def resolve_image_url(raw_image: str) -> str:
+    """Handle Label Studio local-storage proxy URLs (data/local-files/?d=...&fileuri=...)."""
+    import base64
+    if "fileuri=" in raw_image:
+        b64_str = raw_image.split("fileuri=")[-1].split("&")[0]
+        return base64.b64decode(b64_str).decode("utf-8")
+    return raw_image
+
+
+def gcs_path_from_url(url: str) -> str:
+    """Normalize any of: a raw gs://bucket/path URI, a signed
+    https://storage.googleapis.com/bucket/path?... URL, or a Label Studio
+    local-files proxy URL, down to just "bucket/path" - so existing tasks
+    (which may carry any of these forms depending on how they were
+    created) and freshly-signed URLs can be deduplicated against each
+    other regardless of query string / scheme differences."""
+    resolved = resolve_image_url(url)
+    if resolved.startswith("gs://"):
+        return resolved[len("gs://"):]
+    if "storage.googleapis.com/" in resolved:
+        return resolved.split("storage.googleapis.com/", 1)[1].split("?")[0]
+    return resolved.split("?")[0]
+
+
+def fetch_tasks(project, page_size: int) -> list:
+    logger = get_logger(__name__)
+    tasks = []
+    page = 1
+    while True:
+        try:
+            resp = project.get_paginated_tasks(page=page, page_size=page_size)
+            page_tasks = resp.get("tasks", [])
+        except AttributeError:
+            page_tasks = project.get_tasks() if page == 1 else []
+
+        if not page_tasks:
+            break
+        tasks.extend(page_tasks)
+        if len(page_tasks) < page_size:
+            break
+        page += 1
+
+    logger.info(f"Fetched {len(tasks)} task(s) from project")
+    return tasks
+
+
 def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
     category_mapping = None
     if class_names:
@@ -106,8 +177,7 @@ def parse_models(model_specs: list[str], class_names: str | None) -> list[dict]:
 
 def build_prediction_result(annotations, origin_width: int, origin_height: int) -> list:
     """Same percent-based rectanglelabels format as
-    push_disagreement_predictions.py::build_prediction_result /
-    build_tasks_from_data_js.py::build_task."""
+    push_disagreement_predictions.py::build_prediction_result."""
     result = []
     for anno in annotations:
         bbox = anno.bbox
@@ -134,7 +204,8 @@ def build_prediction_result(annotations, origin_width: int, origin_height: int) 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create new Label Studio tasks (with an 'ignore' prediction) from local dataset_july/ images",
+        description="Create new Label Studio tasks for July images with a detected or "
+                    "ground-truth weaving defect",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--dataset", default="dataset_july", help="Local dataset directory (output of scripts/download_dataset.py)")
@@ -161,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validity period (days) for the signed HTTPS image URL written into each new task's "
              "data.image. GCS signed URLs (V4) cap out at 7 days - keep this at or below 7.",
     )
+    parser.add_argument("--page-size", type=int, default=50, help="Label Studio task pagination page size")
     parser.add_argument("--dry-run", action="store_true", help="Report which images would get a new task, but don't create anything")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
     return parser
@@ -192,17 +264,41 @@ def main():
         return 1
     logger.info(f"Found {len(images)} image(s) under {dataset_path}")
 
+    legacy_client = Client(url, api_key)
+    target_project = legacy_client.get_project(args.target_project_id)
+
+    logger.info(f"Fetching existing tasks in target project {args.target_project_id} to skip already-present images")
+    existing_tasks = fetch_tasks(target_project, args.page_size)
+    already_present_paths = {
+        gcs_path_from_url(t.get("data", {}).get("image", "")) for t in existing_tasks
+    }
+    already_present_paths.discard("")
+    logger.info(f"{len(already_present_paths)} image(s) already present in target project")
+
     logger.info("Initializing model(s)")
     verify_configs = {"image_size": args.image_size, "models": parse_models(args.model, args.model_class_names)}
     ai_verify = AIVerify(verify_configs)
 
-    legacy_client = Client(url, api_key)
-    target_project = legacy_client.get_project(args.target_project_id)
     bucket_cache = {}
 
-    created, skipped, failed = 0, 0, 0
+    created, skipped_existing, skipped_no_match, failed = 0, 0, 0, 0
     for i, image_path in enumerate(images, 1):
         rel_path = image_path.relative_to(dataset_path)
+        gcs_path = f"{args.bucket}/{rel_path.as_posix()}"
+
+        if gcs_path in already_present_paths:
+            skipped_existing += 1
+            continue
+
+        json_path = image_path.with_suffix(".json")
+        gt_is_weaving = False
+        if json_path.exists():
+            try:
+                with open(json_path) as f:
+                    sample_json = json.load(f)
+                gt_is_weaving = ground_truth_is_weaving(sample_json)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"[{i}/{len(images)}] {rel_path}: broken JSON sidecar, treating gt as unknown: {e}")
 
         try:
             image = Image.open(image_path).convert("RGB")
@@ -217,16 +313,23 @@ def main():
         final_annotations = ai_verify.merge_predictions(pre_annotations)
         final_annotations = [a for a in final_annotations if a.confidence >= args.confidence_threshold]
 
-        ignore_boxes = [a for a in final_annotations if _canonical(a.defect_type) == IGNORE_LABEL]
-        if not ignore_boxes:
-            skipped += 1
+        weaving_boxes = [a for a in final_annotations if _canonical(a.defect_type) == WEAVING_LABEL]
+        model_detected_weaving = bool(weaving_boxes)
+
+        if not model_detected_weaving and not gt_is_weaving:
+            skipped_no_match += 1
             continue
 
         width, height = image.size
-        result = build_prediction_result(ignore_boxes, width, height)
+        result = build_prediction_result(weaving_boxes, width, height)
+        reasons = []
+        if model_detected_weaving:
+            reasons.append(f"model detected {len(weaving_boxes)} weaving box(es)")
+        if gt_is_weaving:
+            reasons.append("ground truth is Loi_soi/weaving")
 
         logger.info(
-            f"[{i}/{len(images)}] {rel_path}: detected {len(ignore_boxes)} 'ignore' box(es), "
+            f"[{i}/{len(images)}] {rel_path}: {' + '.join(reasons)}, "
             f"{'(dry-run) would create' if args.dry_run else 'creating'} task in project {args.target_project_id}"
         )
 
@@ -241,13 +344,12 @@ def main():
             failed += 1
             continue
 
-        task = {
-            "data": {"image": image_url},
-            "predictions": [{
-                "model_version": f"ignore_from_july_{args.model[0].split(':')[0]}",
+        task = {"data": {"image": image_url}}
+        if result:
+            task["predictions"] = [{
+                "model_version": f"weaving_from_july_{args.model[0].split(':')[0]}",
                 "result": result,
-            }],
-        }
+            }]
 
         try:
             target_project.import_tasks([task])
@@ -260,11 +362,14 @@ def main():
 
     if args.dry_run:
         logger.info(
-            f"Done (dry-run). would_create={created} skipped={skipped} failed={failed} "
-            f"total={len(images)} -- nothing was created"
+            f"Done (dry-run). would_create={created} skipped_existing={skipped_existing} "
+            f"skipped_no_match={skipped_no_match} failed={failed} total={len(images)} -- nothing was created"
         )
     else:
-        logger.info(f"Done. created={created} skipped={skipped} failed={failed} total={len(images)}")
+        logger.info(
+            f"Done. created={created} skipped_existing={skipped_existing} "
+            f"skipped_no_match={skipped_no_match} failed={failed} total={len(images)}"
+        )
     return 0
 
 
