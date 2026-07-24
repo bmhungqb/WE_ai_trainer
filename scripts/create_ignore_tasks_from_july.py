@@ -10,15 +10,18 @@ Does NOT pull anything from GCS - if dataset_july/ doesn't exist locally,
 this aborts with an error telling you to run scripts/download_dataset.py
 first (or point --dataset at wherever it actually lives).
 
-Each new task's "data.image" is a signed HTTPS URL (google.cloud.storage
-Blob.generate_signed_url, --signed-url-days validity) for
-gs://<bucket>/<folder>/<filename> (mirroring the local <folder>/<filename>
-layout back onto the GCS bucket it was downloaded from - see
-scripts/download_dataset.py). A raw gs:// URI does NOT work here: unlike
-tasks Label Studio's own Cloud Storage sync creates (which it resolves
-server-side), tasks created via the API/import_tasks are rendered directly
-in the browser, which can't fetch gs:// at all - it needs a plain https://
-URL, which is what the signing step produces.
+Each new task's "data.image" is the raw gs://<bucket>/<folder>/<filename>
+URI (mirroring the local <folder>/<filename> layout back onto the GCS
+bucket it was downloaded from - see scripts/download_dataset.py). This
+works IF AND ONLY IF the target project already has a GCS Import Storage
+configured for that exact bucket with use_blob_urls=true (check via GET
+/api/storages?project=<id>) - Label Studio then matches the raw gs://
+value against that storage automatically and serves it through its own
+/tasks/<id>/resolve/ proxy, the same mechanism every task created by that
+storage's own sync uses. Without such a storage configured, a raw gs://
+URI won't render in the browser at all - use a signed HTTPS URL
+(google.cloud.storage Blob.generate_signed_url) instead in that case, and
+make sure the bucket's CORS policy allows the Label Studio origin.
 
 Requires a GPU environment (torch, rfdetr, rfdetr_plus, sahi) to run
 inference - not executed in this repo's dev sandbox.
@@ -65,11 +68,12 @@ def _canonical(label: str) -> str:
 
 
 def sign_gcs_url(bucket_cache: dict, bucket_name: str, blob_path: str, days: int) -> str:
-    """A raw gs:// URI can't be rendered by a browser - Label Studio's own
-    Cloud Storage sync resolves gs:// server-side for tasks IT creates, but
-    tasks created via the API (like this script's) are served directly to
-    the browser and need a plain https:// URL. generate_signed_url() makes
-    one without changing the object's bucket ACL."""
+    """Only used with --use-signed-url, for target projects without a GCS
+    Import Storage configured (use_blob_urls=true) for --bucket. Without
+    that storage, a raw gs:// URI can't be rendered by the browser at all -
+    generate_signed_url() makes a plain https:// URL that works without
+    changing the object's bucket ACL, but requires the bucket's CORS policy
+    to allow the Label Studio origin."""
     import datetime
 
     from utils.gcs_utils import init_connect_gcs_bucket
@@ -157,9 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-size", type=int, nargs=2, metavar=("W", "H"), default=[576, 576], help="Expected raw image size")
     parser.add_argument("--confidence-threshold", type=float, default=0.5)
     parser.add_argument(
+        "--use-signed-url", action="store_true",
+        help="Use a signed HTTPS URL for data.image instead of a raw gs:// URI. Only needed if "
+             "the target project does NOT have a GCS Import Storage configured for --bucket with "
+             "use_blob_urls=true (check via GET /api/storages?project=<id>) - if it does, the raw "
+             "gs:// URI (the default) resolves the same way every existing task in that project "
+             "already does, with no CORS setup needed.",
+    )
+    parser.add_argument(
         "--signed-url-days", type=int, default=6,
-        help="Validity period (days) for the signed HTTPS image URL written into each new task's "
-             "data.image. GCS signed URLs (V4) cap out at 7 days - keep this at or below 7.",
+        help="Validity period (days) for the signed HTTPS image URL, only used with --use-signed-url. "
+             "GCS signed URLs (V4) cap out at 7 days - keep this at or below 7.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report which images would get a new task, but don't create anything")
     parser.add_argument("--log-dir", default="./logs", help="Directory for log files")
@@ -234,12 +246,15 @@ def main():
             created += 1
             continue
 
-        try:
-            image_url = sign_gcs_url(bucket_cache, args.bucket, rel_path.as_posix(), args.signed_url_days)
-        except Exception as e:
-            logger.error(f"[{i}/{len(images)}] {rel_path}: failed to sign image URL: {e}")
-            failed += 1
-            continue
+        if args.use_signed_url:
+            try:
+                image_url = sign_gcs_url(bucket_cache, args.bucket, rel_path.as_posix(), args.signed_url_days)
+            except Exception as e:
+                logger.error(f"[{i}/{len(images)}] {rel_path}: failed to sign image URL: {e}")
+                failed += 1
+                continue
+        else:
+            image_url = f"gs://{args.bucket}/{rel_path.as_posix()}"
 
         task = {
             "data": {"image": image_url},
